@@ -13,6 +13,7 @@ API_ID = 38659771
 API_HASH = "6178147a40a23ade99f8b3a45f00e436"
 BOT_TOKEN = "7966844330:AAE10tysbFmMnL3dIQhf1RHrNEwRUrpDJOU"
 ALLOWED_GROUP_ID = -1003759432523
+DOWNLOAD_DIR = "downloads"
 
 # Logger setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 # Initialize Telegram Client
 bot = TelegramClient('insta_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+# Create download directory if not exists
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
+
+# Global Job Queue
+# Item format: (chat_id, url_string, index_in_batch, total_in_batch)
+JOB_QUEUE = asyncio.Queue()
 
 def get_instagram_media_links(instagram_url):
     """
@@ -54,10 +63,7 @@ def get_instagram_media_links(instagram_url):
         soup = BeautifulSoup(html_content, 'html.parser')
         media_links = []
         
-        # Primary target: id="download-video"
         download_buttons = soup.find_all('a', id='download-video')
-        
-        # Fallback: look for class 'bg-gradient-success'
         if not download_buttons:
              download_buttons = soup.find_all('a', class_='bg-gradient-success')
 
@@ -72,11 +78,94 @@ def get_instagram_media_links(instagram_url):
         logger.error(f"Request failed: {e}")
         return []
 
+async def worker():
+    """
+    Background worker that processes links one by one from the queue.
+    """
+    logger.info("Worker started...")
+    while True:
+        # Wait for a task
+        task = await JOB_QUEUE.get()
+        chat_id, original_url, idx, total = task
+        
+        # Determine Cleaned URL
+        cleaned_url = original_url.split('?')[0].rstrip('/')
+        
+        # Send Status Message
+        try:
+            status_msg = await bot.send_message(chat_id, f"Processing {idx}/{total}\n{cleaned_url}", link_preview=False)
+        except Exception as e:
+            logger.error(f"Failed to send status message: {e}")
+            JOB_QUEUE.task_done()
+            continue
+
+        try:
+            # 1. Extract Links
+            media_links = await asyncio.to_thread(get_instagram_media_links, original_url)
+            
+            if not media_links:
+                await bot.send_message(chat_id, f"Error - No Media Found\n{cleaned_url}")
+                await status_msg.delete()
+                JOB_QUEUE.task_done()
+                await asyncio.sleep(1)
+                continue
+
+            # 2. Process Media
+            total_media = len(media_links)
+            
+            for i, link in enumerate(media_links, 1):
+                caption = f"{cleaned_url}"
+                if total_media > 1:
+                    caption = f"{i}/{total_media}\n{cleaned_url}"
+
+                download_path = None
+                try:
+                    # Download content to disk (Server Save)
+                    r = await asyncio.to_thread(requests.get, link)
+                    if r.status_code == 200:
+                        is_video = 'video' in r.headers.get('Content-Type', '')
+                        ext = 'mp4' if is_video else 'jpg'
+                        
+                        # create unique filename
+                        filename = f"{chat_id}_{idx}_{i}.{ext}"
+                        download_path = os.path.join(DOWNLOAD_DIR, filename)
+                        
+                        with open(download_path, 'wb') as f:
+                            f.write(r.content)
+                        
+                        # Upload from disk
+                        await bot.send_file(chat_id, download_path, caption=caption, force_document=False)
+                    else:
+                        await bot.send_message(chat_id, f"Failed to download a file from: {cleaned_url}")
+                except Exception as e:
+                    logger.error(f"Error sending file: {e}")
+                    await bot.send_message(chat_id, f"Failed to upload a file from: {cleaned_url}")
+                finally:
+                    # Clean up file from server
+                    if download_path and os.path.exists(download_path):
+                        os.remove(download_path)
+
+            await status_msg.delete()
+
+        except Exception as e:
+            logger.error(f"Worker Error: {e}")
+            await bot.send_message(chat_id, f"Error processing {cleaned_url}")
+            # Try to delete status message if exists
+            try:
+                await status_msg.delete()
+            except:
+                pass
+        
+        # Mark task as done and wait a bit
+        JOB_QUEUE.task_done()
+        await asyncio.sleep(1)
+
+
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if event.chat_id != ALLOWED_GROUP_ID and not event.is_private:
         return
-    await event.respond("Hello! Send me an Instagram post URL here to extract media.")
+    await event.respond("Hello! Send me Instagram post URLs (space separated) and I will queue them for processing.")
 
 @bot.on(events.NewMessage(pattern='/update'))
 async def update_handler(event):
@@ -85,7 +174,6 @@ async def update_handler(event):
 
     msg = await event.reply("Checking for updates...")
     try:
-        # Run git pull
         process = await asyncio.create_subprocess_shell(
             "git pull",
             stdout=asyncio.subprocess.PIPE,
@@ -99,7 +187,6 @@ async def update_handler(event):
             await msg.edit(f"Bot is already up to date.\n`{output}`")
         else:
             await msg.edit(f"Update successful!\n`{output}`\nRestarting bot...")
-            # Restart the script
             os.execl(sys.executable, sys.executable, *sys.argv)
             
     except Exception as e:
@@ -108,26 +195,22 @@ async def update_handler(event):
 
 @bot.on(events.NewMessage)
 async def message_handler(event):
-    # Check if message is from the allowed group or DM
     if event.chat_id != ALLOWED_GROUP_ID and not event.is_private:
         return
 
-    # Ignore commands (handled by their own handlers)
     if event.text.startswith('/'):
         return
 
     ctx = event.text.strip()
     
-    # Find all instagram URLs in the message
-    # Regex to capture basic instagram urls (p, reel, etc)
-    # This regex looks for http/https, instagram.com, and captures until whitespace
+    # 1. Regex to find all URLs
     url_pattern = r'(https?://(?:www\.)?instagram\.com/\S+)'
     urls = re.findall(url_pattern, ctx)
     
     if not urls:
         return
 
-    # Deduplicate URLs while preserving order
+    # 2. Deduplicate
     seen = set()
     unique_urls = []
     for url in urls:
@@ -136,66 +219,19 @@ async def message_handler(event):
             seen.add(url)
     urls = unique_urls
 
-    total_links = len(urls)
+    # 3. Add to Queue
+    count = 0
+    total = len(urls)
+    for idx, url in enumerate(urls, 1):
+        await JOB_QUEUE.put((event.chat_id, url, idx, total))
+        count += 1
     
-    for idx, current_url in enumerate(urls, 1):
-        # Clean the URL first for display
-        cleaned_url = current_url.split('?')[0].rstrip('/')
-        
-        status_msg = await event.reply(f"Processing {idx}/{total_links}\n{cleaned_url}", link_preview=False)
-        
-        try:
-            # Extract media
-            media_links = await asyncio.to_thread(get_instagram_media_links, current_url)
-            
-            if not media_links:
-                # If failed, edit status to show error, wait a bit maybe? 
-                # User asked to "delete it", but we should probably show error result.
-                # The user requirement was specific: "after process delete it". 
-                # If we delete immediately on error, user won't see error.
-                # But strict adherence to "Error - No Media Found" requested previously.
-                # I will send the error message as a normal message then delete the status msg.
-                await event.respond(f"Error - No Media Found\n{cleaned_url}")
-                await status_msg.delete()
-                continue
-
-            # Upload media
-            total_media = len(media_links)
-            for i, link in enumerate(media_links, 1):
-                caption = f"{cleaned_url}"
-                if total_media > 1:
-                    caption = f"{i}/{total_media}\n{cleaned_url}"
-
-                try:
-                    # Download content to send as proper media type
-                    r = await asyncio.to_thread(requests.get, link)
-                    if r.status_code == 200:
-                        is_video = 'video' in r.headers.get('Content-Type', '')
-                        filename = 'video.mp4' if is_video else 'image.jpg'
-                        
-                        file_obj = io.BytesIO(r.content)
-                        file_obj.name = filename
-                        
-                        await bot.send_file(event.chat_id, file_obj, caption=caption, force_document=False)
-                    else:
-                        await event.respond(f"Failed to download a file from: {cleaned_url}")
-                except Exception as e:
-                    logger.error(f"Error sending file: {e}")
-                    await event.respond(f"Failed to upload a file from: {cleaned_url}")
-            
-            # Finished processing this link, delete status message
-            await status_msg.delete()
-            # Small delay to ensure clean sequential processing and avoid rate limits
-            await asyncio.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"Error in handler loop: {e}")
-            await event.respond(f"Error processing {cleaned_url}")
-            await status_msg.delete()
-            await asyncio.sleep(1)
+    await event.reply(f"Added {count} links to the processing queue.")
 
 def main():
     logger.info("Bot is running...")
+    # Start the worker task loop
+    bot.loop.create_task(worker())
     bot.run_until_disconnected()
 
 if __name__ == '__main__':

@@ -123,15 +123,23 @@ async def message_handler(event):
         try:
             media_links = await asyncio.to_thread(get_instagram_media_links, ctx)
             
+            # Clean the URL (remove query parameters)
+            cleaned_url = ctx.split('?')[0]
+
             if not media_links:
-                await status_msg.edit("Could not find any media. Make sure the account is public or the link is correct.")
+                await status_msg.edit(f"Error - No Media Found\n{cleaned_url}")
                 return
 
             await status_msg.edit(f"Found {len(media_links)} media file(s). Uploading now...")
             
-            for link in media_links:
+            total_media = len(media_links)
+            for i, link in enumerate(media_links, 1):
+                caption = f"{cleaned_url}"
+                if total_media > 1:
+                    caption = f"{i}/{total_media}\n{cleaned_url}"
+
                 try:
-                    await bot.send_file(event.chat_id, link, caption="Here is your media")
+                    await bot.send_file(event.chat_id, link, caption=caption, force_document=False)
                 except Exception as e:
                     logger.error(f"Error sending file: {e}")
                     await event.respond(f"Failed to upload a file: {link}")

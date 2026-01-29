@@ -4,6 +4,7 @@ import requests
 import os
 import sys
 import io
+import re
 from bs4 import BeautifulSoup
 from telethon import TelegramClient, events
 
@@ -117,22 +118,42 @@ async def message_handler(event):
 
     ctx = event.text.strip()
     
-    # Check if it looks like a URL
-    if "instagram.com" in ctx:
-        status_msg = await event.reply("Processing... Please wait.")
+    # Find all instagram URLs in the message
+    # Regex to capture basic instagram urls (p, reel, etc)
+    # This regex looks for http/https, instagram.com, and captures until whitespace
+    url_pattern = r'(https?://(?:www\.)?instagram\.com/\S+)'
+    urls = re.findall(url_pattern, ctx)
+    
+    if not urls:
+        return
+
+    # Filter out duplicates if needed, but sequential processing might be desired even for dupes if user intends it.
+    # We will process list as is.
+
+    total_links = len(urls)
+    
+    for idx, current_url in enumerate(urls, 1):
+        status_msg = await event.reply(f"Processing {idx}/{total_links}\n{current_url}")
         
         try:
-            media_links = await asyncio.to_thread(get_instagram_media_links, ctx)
-            
             # Clean the URL (remove query parameters and trailing slash)
-            cleaned_url = ctx.split('?')[0].rstrip('/')
-
-            if not media_links:
-                await status_msg.edit(f"Error - No Media Found\n{cleaned_url}")
-                return
-
-            await status_msg.edit(f"Found {len(media_links)} media file(s). Uploading now...")
+            cleaned_url = current_url.split('?')[0].rstrip('/')
             
+            # Extract media
+            media_links = await asyncio.to_thread(get_instagram_media_links, current_url)
+            
+            if not media_links:
+                # If failed, edit status to show error, wait a bit maybe? 
+                # User asked to "delete it", but we should probably show error result.
+                # The user requirement was specific: "after process delete it". 
+                # If we delete immediately on error, user won't see error.
+                # But strict adherence to "Error - No Media Found" requested previously.
+                # I will send the error message as a normal message then delete the status msg.
+                await event.respond(f"Error - No Media Found\n{cleaned_url}")
+                await status_msg.delete()
+                continue
+
+            # Upload media
             total_media = len(media_links)
             for i, link in enumerate(media_links, 1):
                 caption = f"{cleaned_url}"
@@ -151,16 +172,18 @@ async def message_handler(event):
                         
                         await bot.send_file(event.chat_id, file_obj, caption=caption, force_document=False)
                     else:
-                        await event.respond(f"Failed to download a file: {link}")
+                        await event.respond(f"Failed to download a file from: {cleaned_url}")
                 except Exception as e:
                     logger.error(f"Error sending file: {e}")
-                    await event.respond(f"Failed to upload a file: {link}")
+                    await event.respond(f"Failed to upload a file from: {cleaned_url}")
             
+            # Finished processing this link, delete status message
             await status_msg.delete()
             
         except Exception as e:
-            logger.error(f"Error in handler: {e}")
-            await status_msg.edit("An error occurred while processing your request.")
+            logger.error(f"Error in handler loop: {e}")
+            await event.respond(f"Error processing {cleaned_url}")
+            await status_msg.delete()
 
 def main():
     logger.info("Bot is running...")

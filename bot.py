@@ -3,6 +3,7 @@ import asyncio
 import requests
 import os
 import sys
+import io
 from bs4 import BeautifulSoup
 from telethon import TelegramClient, events
 
@@ -123,8 +124,8 @@ async def message_handler(event):
         try:
             media_links = await asyncio.to_thread(get_instagram_media_links, ctx)
             
-            # Clean the URL (remove query parameters)
-            cleaned_url = ctx.split('?')[0]
+            # Clean the URL (remove query parameters and trailing slash)
+            cleaned_url = ctx.split('?')[0].rstrip('/')
 
             if not media_links:
                 await status_msg.edit(f"Error - No Media Found\n{cleaned_url}")
@@ -139,7 +140,18 @@ async def message_handler(event):
                     caption = f"{i}/{total_media}\n{cleaned_url}"
 
                 try:
-                    await bot.send_file(event.chat_id, link, caption=caption, force_document=False)
+                    # Download content to send as proper media type
+                    r = await asyncio.to_thread(requests.get, link)
+                    if r.status_code == 200:
+                        is_video = 'video' in r.headers.get('Content-Type', '')
+                        filename = 'video.mp4' if is_video else 'image.jpg'
+                        
+                        file_obj = io.BytesIO(r.content)
+                        file_obj.name = filename
+                        
+                        await bot.send_file(event.chat_id, file_obj, caption=caption, force_document=False)
+                    else:
+                        await event.respond(f"Failed to download a file: {link}")
                 except Exception as e:
                     logger.error(f"Error sending file: {e}")
                     await event.respond(f"Failed to upload a file: {link}")

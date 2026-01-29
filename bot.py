@@ -39,7 +39,12 @@ def get_instagram_media_links(instagram_url):
     # Using the raw URL for data fetching as requested by the user
     params = {'url': instagram_url}
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://mollygram.com/',
+        'Origin': 'https://mollygram.com',
+        'X-Requested-With': 'XMLHttpRequest'
     }
 
     try:
@@ -50,7 +55,7 @@ def get_instagram_media_links(instagram_url):
         try:
             data = response.json()
         except Exception:
-            logger.error("Error: content is not valid JSON.")
+            logger.error(f"Error: content is not valid JSON. Content: {response.text[:500]}")
             return []
 
         if data.get("status") != "ok":
@@ -105,7 +110,7 @@ async def worker():
             media_links = await asyncio.to_thread(get_instagram_media_links, original_url)
             
             if not media_links:
-                await bot.send_message(chat_id, f"Error - No Media Found\n{cleaned_url}")
+                await bot.send_message(chat_id, f"Error - No Media Found\n{cleaned_url}", link_preview=False)
                 await status_msg.delete()
                 JOB_QUEUE.task_done()
                 await asyncio.sleep(1)

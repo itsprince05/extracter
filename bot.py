@@ -39,9 +39,11 @@ def get_instagram_media_links(instagram_url):
     clean_url = instagram_url.split('?')[0].rstrip('/')
     
     base_url = "https://media.mollygram.com/"
-    params = {'url': clean_url}
+    # URGENT FIX: Use the RAW URL (instagram_url) for the API request as requested by the user.
+    # Do NOT use clean_url for the params.
+    params = {'url': instagram_url}
     
-    # Reverting to the simple headers that worked originally
+    # Simple headers
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
@@ -49,7 +51,7 @@ def get_instagram_media_links(instagram_url):
     # Retry logic
     for attempt in range(3):
         try:
-            logger.info(f"Fetching data for: {clean_url} (Attempt {attempt+1})")
+            logger.info(f"Fetching data for: {instagram_url} (Attempt {attempt+1})")
             response = requests.get(base_url, params=params, headers=headers, timeout=10)
             
             if response.status_code != 200:

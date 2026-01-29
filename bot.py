@@ -35,54 +35,65 @@ def get_instagram_media_links(instagram_url):
     Takes an Instagram post URL, queries media.mollygram.com,
     and returns a list of media download URLs found in the response.
     """
+    # Use cleaned URL for the API to avoid parameter issues and improve success rate
+    clean_url = instagram_url.split('?')[0].rstrip('/')
+    
     base_url = "https://media.mollygram.com/"
-    # Using the raw URL for data fetching as requested by the user
-    params = {'url': instagram_url}
+    params = {'url': clean_url}
+    
+    # Reverting to the simple headers that worked originally
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://mollygram.com/',
-        'Origin': 'https://mollygram.com',
-        'X-Requested-With': 'XMLHttpRequest'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    try:
-        logger.info(f"Fetching data for: {instagram_url}...")
-        response = requests.get(base_url, params=params, headers=headers)
-        response.raise_for_status()
-        
+    # Retry logic
+    for attempt in range(3):
         try:
-            data = response.json()
-        except Exception:
-            logger.error(f"Error: content is not valid JSON. Content: {response.text[:500]}")
-            return []
+            logger.info(f"Fetching data for: {clean_url} (Attempt {attempt+1})")
+            response = requests.get(base_url, params=params, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                logger.error(f"API returned status {response.status_code}")
+                # If 429/403, maybe wait a bit
+                if response.status_code in [429, 503]:
+                    await asyncio.sleep(2)
+                    continue
+                continue # Try again or fail
+            
+            try:
+                data = response.json()
+            except Exception:
+                logger.error(f"Error: content is not valid JSON. Content: {response.text[:200]}")
+                continue
 
-        if data.get("status") != "ok":
-            logger.error(f"Error from API: {data.get('status')}")
-            return []
+            if data.get("status") != "ok":
+                logger.error(f"Error from API: {data.get('status')}")
+                continue
 
-        html_content = data.get("html", "")
-        if not html_content:
-            return []
+            html_content = data.get("html", "")
+            if not html_content:
+                continue
 
-        soup = BeautifulSoup(html_content, 'html.parser')
-        media_links = []
+            soup = BeautifulSoup(html_content, 'html.parser')
+            media_links = []
+            
+            download_buttons = soup.find_all('a', id='download-video')
+            if not download_buttons:
+                download_buttons = soup.find_all('a', class_='bg-gradient-success')
+
+            for btn in download_buttons:
+                href = btn.get('href')
+                if href:
+                    media_links.append(href)
+
+            if media_links:
+                return media_links
         
-        download_buttons = soup.find_all('a', id='download-video')
-        if not download_buttons:
-             download_buttons = soup.find_all('a', class_='bg-gradient-success')
-
-        for btn in download_buttons:
-            href = btn.get('href')
-            if href:
-                media_links.append(href)
-
-        return media_links
-
-    except Exception as e:
-        logger.error(f"Request failed: {e}")
-        return []
+        except Exception as e:
+            logger.error(f"Request failed (Attempt {attempt+1}): {e}")
+            await asyncio.sleep(1)
+    
+    return []
 
 async def worker():
     """

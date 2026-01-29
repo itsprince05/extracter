@@ -39,9 +39,9 @@ A simple Telegram bot that takes an Instagram Post/Reel URL and sends back the m
    ```
 
 ## Usage
-1. **Join the Allowed Group**: The bot is configured to only respond in the group with ID `-1003759432523`.
-2. **Download Media**: Send an Instagram link (e.g., `https://www.instagram.com/p/Example/`) in the allowed group.
-3. **Update Bot**: Send `/update` in the group to pull the latest changes from the git repository and restart the bot.
+1. **Join the Allowed Group or DM**: The bot works in the group `-1003759432523` or via Direct Message.
+2. **Download Media**: Send an Instagram link (e.g., `https://www.instagram.com/p/Example/`) to the bot.
+3. **Update Bot**: Send `/update` to pull the latest changes from the git repository and restart the bot.
 
 ## Files
 - `bot.py`: Main bot logic.

@@ -142,23 +142,61 @@ async def worker():
 
                 download_path = None
                 try:
-                    # Download content to disk (Server Save)
-                    r = await asyncio.to_thread(requests.get, link)
-                    if r.status_code == 200:
-                        is_video = 'video' in r.headers.get('Content-Type', '')
-                        ext = 'mp4' if is_video else 'jpg'
-                        
-                        # create unique filename
-                        filename = f"{chat_id}_{idx}_{i}.{ext}"
-                        download_path = os.path.join(DOWNLOAD_DIR, filename)
-                        
-                        with open(download_path, 'wb') as f:
-                            f.write(r.content)
-                        
+                    # Download content to disk (Streamed)
+                    def download_media(url, path=None):
+                        with requests.get(url, stream=True) as r:
+                            r.raise_for_status()
+                            
+                            # Determine filename if not provided (temp logic to get ext)
+                            is_video = 'video' in r.headers.get('Content-Type', '')
+                            ext = 'mp4' if is_video else 'jpg'
+                            
+                            if path is None:
+                                # We need to return path and ext if not provided, but here we construct path outside
+                                return None, ext, is_video
+                                
+                            with open(path, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=8192): 
+                                    f.write(chunk)
+                            return True, ext, is_video
+
+                    # 1. Peek headers to determine extension and path
+                    # We do a quick head request or just stream start? 
+                    # Simpler: Just start the get in thread, use logic to define path, then write.
+                    # Since we need 'idx' and 'i' for filename, we do it all in one custom wrapper or split.
+                    
+                    # Let's do a cleaner custom function for the thread
+                    def process_download(url, base_filename):
+                         with requests.get(url, stream=True) as r:
+                            if r.status_code != 200:
+                                return None, None
+                            
+                            is_video = 'video' in r.headers.get('Content-Type', '')
+                            ext = 'mp4' if is_video else 'jpg'
+                            final_filename = f"{base_filename}.{ext}"
+                            final_path = os.path.join(DOWNLOAD_DIR, final_filename)
+                            
+                            with open(final_path, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=8192): 
+                                    f.write(chunk)
+                            return final_path, is_video
+
+                    base_name = f"{chat_id}_{idx}_{i}"
+                    download_path, is_video = await asyncio.to_thread(process_download, link, base_name)
+                    
+                    if download_path and os.path.exists(download_path):
                         # Upload from disk
-                        await bot.send_file(MEDIA_GROUP_ID, download_path, caption=caption, force_document=False)
+                        # supports_streaming=True allows videos to play while downloading
+                        await bot.send_file(
+                            MEDIA_GROUP_ID, 
+                            download_path, 
+                            caption=caption, 
+                            force_document=False,
+                            supports_streaming=True if is_video else False
+                        )
                     else:
                         await bot.send_message(ERROR_GROUP_ID, f"Failed to download a file from: {cleaned_url}")
+
                 except Exception as e:
                     logger.error(f"Error sending file: {e}")
                     await bot.send_message(ERROR_GROUP_ID, f"Failed to upload a file from: {cleaned_url}")

@@ -178,46 +178,65 @@ async def process_queue(notify_chat_id):
     global IS_PROCESSING
     IS_PROCESSING = True
     
-    await bot.send_message(notify_chat_id, f"🚀 Batch Processing:")
+    await bot.send_message(notify_chat_id, f"🚀 Batch Processing")
     
-    # Ensure client is connected
     if not user.is_connected():
         await user.connect()
 
     while not LINK_QUEUE.empty():
         url = await LINK_QUEUE.get()
         try:
-            # --- Step 1: Send to Primary Bot ---
             logger.info(f"Processing {url}")
             async with user.conversation(TARGET_PRIMARY, timeout=60) as conv:
                 await conv.send_message(url)
                 
-                # Check response
-                attempts = 0
+                # The bot sends multiple messages:
+                # 1. "Started downloading..."
+                # 2. Emoji
+                # 3. Final Result (Media OR Error)
+                
                 final_response = None
                 
-                while attempts < 3:
+                # Loop to consume incoming messages until we get a result
+                start_time = asyncio.get_event_loop().time()
+                while (asyncio.get_event_loop().time() - start_time) < 45:
                     try:
                         response = await conv.get_response()
                     except asyncio.TimeoutError:
-                        break 
-                        
+                        break
+                    
                     if response.media:
                         final_response = response
-                        break 
+                        break
                     
                     text_lower = response.text.lower() if response.text else ""
-                    # Ignore transient status
-                    if "processing" in text_lower or "downloading" in text_lower or "wait" in text_lower:
-                        attempts += 1
+                    
+                    # Check for known "Processing" messages to ignore
+                    if "я начал качать" in text_lower or "подождите" in text_lower or "film_4k_bot" in text_lower:
                         continue
                     
-                    final_response = response
-                    break
-
+                    # Check for Error Signature
+                    is_error_text = False
+                    for sig in ERROR_SIGNATURES:
+                        if sig.lower() in text_lower:
+                            is_error_text = True
+                            break
+                    
+                    if is_error_text:
+                        final_response = response
+                        break
+                        
+                    # If it's just an emoji or very short text (spacer), ignore
+                    if len(response.text) < 5:
+                        continue
+                        
+                    # If we got here, it might be an unknown text response, treat as potential error/status
+                    # But let's keep waiting in case media comes next
+                    # (Unless it matches strict error, which we caught above)
+                    
                 # --- Decision Logic ---
                 if final_response and final_response.media:
-                    # ✅ Case A: Media Received -> Send to Video Group
+                    # ✅ Success
                     try:
                         await user.send_file(
                             GROUP_MEDIA, 
@@ -226,38 +245,21 @@ async def process_queue(notify_chat_id):
                         )
                         await bot.send_message(notify_chat_id, f"✅ Saved: {url}")
                     except Exception as e:
-                        logger.error(f"Failed to copy to group: {e}")
-                        
+                        logger.error(f"Copy Error: {e}")
                 else:
-                    # Case B: Text Response
-                    text_content = final_response.text if final_response else ""
+                    # ❌ Error or Timeout
+                    # Send to Fallback
+                    await user.send_message(TARGET_FALLBACK, url)
                     
-                    # Check for the SPECIFIC Russian error
-                    is_target_error = False
-                    for sig in ERROR_SIGNATURES:
-                        if sig in text_content: # Case sensitive search often better for specific phrases
-                            is_target_error = True
-                            break
+                    # Log to Error Group
+                    await user.send_message(GROUP_ERROR, f"Error\n{url}")
                     
-                    # User: "jis url ke reply me bot ye bhejega ... wo error link hai usko error group aur 2nd bot ko bhejna hai bas"
-                    if is_target_error:
-                        # 1. Send to Fallback Bot
-                        await user.send_message(TARGET_FALLBACK, url)
-                        
-                        # 2. Send "Error\nurl" to Error Group
-                        await user.send_message(GROUP_ERROR, f"Error\n{url}")
-                        
-                        await bot.send_message(notify_chat_id, f"⚠️ Error found -> Forwarded to Fallback: {url}")
-                    else:
-                        # Unknown state (neither media nor specific error)
-                        # Do nothing or just log locally
-                        logger.warning(f"Unknown response for {url}: {text_content[:50]}...")
+                    await bot.send_message(notify_chat_id, f"⚠️ Error -> Fallback: {url}")
 
-            # Cooldown
             await asyncio.sleep(5)
 
         except Exception as e:
-            logger.error(f"Processing Logic Error: {e}")
+            logger.error(f"Logic Error: {e}")
             
     await bot.send_message(notify_chat_id, "✅ Batch Done!")
     IS_PROCESSING = False

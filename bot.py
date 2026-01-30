@@ -76,21 +76,28 @@ async def message_handler(event):
     # --- Login Flow ---
     if LOGIN_STATE.get('step') == 'ask_phone' and LOGIN_STATE.get('chat_id') == chat_id:
         LOGIN_STATE['phone'] = text
-        await event.respond("🔄 Connecting to Telegram...")
+        status_msg = await event.respond("🔄 Initializing User Client...")
         
-        await user.connect()
-        if await user.is_user_authorized():
-            await event.respond("✅ Already logged in!")
-            LOGIN_STATE['step'] = None
-            return
-
         try:
+            if not user.is_connected():
+                await user.connect()
+            
+            if await user.is_user_authorized():
+                await status_msg.edit("✅ Already logged in!")
+                LOGIN_STATE['step'] = None
+                return
+
+            await status_msg.edit(f"🔄 Sending OTP to {text}...")
             sent_code = await user.send_code_request(text)
             LOGIN_STATE['hash'] = sent_code.phone_code_hash
             LOGIN_STATE['step'] = 'ask_otp'
-            await event.respond("📩 OTP sent! Please reply with the OTP.\n\nYou can send it like `1 2 3 4 5` or `12345`.")
+            await status_msg.edit(f"📩 **OTP Sent!**\n\nPlease check your other Telegram devices.\nReply with the code (e.g. `1 2 3 4 5`).")
+            
         except Exception as e:
-            await event.respond(f"❌ Error sending code: {e}")
+            logger.error(f"Login failed: {e}", exc_info=True)
+            await status_msg.edit(f"❌ Error during login:\n`{str(e)}`\n\nPlease try /login again.")
+            # Disconnect to ensure fresh state next time
+            await user.disconnect()
             LOGIN_STATE['step'] = None
         return
 
@@ -192,27 +199,45 @@ async def handle_target_response(event):
         #        logger.error(f"Failed to delete garbage: {e}")
         pass
 
+@bot.on(events.NewMessage(pattern='/export'))
+async def export_session(event):
+    if not event.is_private: return
+    try:
+        await user.connect()
+        if not await user.is_user_authorized():
+            await event.respond("❌ You are not logged in yet.")
+            return
+        sess_string = user.session.save()
+        await event.respond(f"🔑 **Your Session String** (Keep Safe!):\n\n`{sess_string}`")
+    except Exception as e:
+        await event.respond(f"❌ Error exporting: {e}")
+
 # --- Main Entry ---
 if __name__ == '__main__':
+    print("---------------------------------------")
     logger.info("Starting Reflector Bot...")
-    # Start bot first, User starts strictly on /login command or if session exists
-    # But we need run_until_disconnected
+    
+    # Use absolute path for session to prevent loss during generic CWD changes
+    session_path = os.path.abspath("user_session")
+    logger.info(f"Session File Path: {session_path}.session")
     
     loop = asyncio.get_event_loop()
     
-    # We start the bot (polling)
-    # The user client connects on demand or parallel if session exists
-    loop.create_task(bot.run_until_disconnected())
-    
-    # If user session exists, connect it in background
-    if os.path.exists("user_session.session"):
-        async def auto_connect_user():
-            try:
-                await user.connect()
-                if await user.is_user_authorized():
-                    logger.info("User session loaded automatically.")
-            except Exception as e:
-                logger.error(f"Auto-connect failed: {e}")
-        loop.create_task(auto_connect_user())
+    # Verify User Session Immediately
+    async def init_clients():
+        # Connect User Client
+        try:
+            await user.connect()
+            if await user.is_user_authorized():
+                me = await user.get_me()
+                logger.info(f"✅ User Client Logged In as: {me.first_name} (@{me.username})")
+            else:
+                logger.warning("⚠️ User Client NOT Logged In. Send /login to Controller Bot.")
+        except Exception as e:
+            logger.error(f"❌ User Client Connection Failed: {e}")
 
-    loop.run_forever()
+    # Run init before starting polling
+    loop.run_until_complete(init_clients())
+    
+    # Start Controller Bot
+    bot.run_until_disconnected()

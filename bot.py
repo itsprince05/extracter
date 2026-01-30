@@ -35,92 +35,128 @@ JOB_QUEUE = asyncio.Queue()
 
 # Auto-install dependencies if missing
 try:
+    import instaloader
+    import yt_dlp
     import requests
     from bs4 import BeautifulSoup
 except ImportError:
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "instaloader", "yt-dlp", "requests", "beautifulsoup4"])
+    import instaloader
+    import yt_dlp
     import requests
     from bs4 import BeautifulSoup
 
+# Global Instaloader Instance
+L = instaloader.Instaloader(
+    download_pictures=False,
+    download_videos=False, 
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    compress_json=False
+)
+
 def get_instagram_media_links(instagram_url, unique_id):
     """
-    Takes an Instagram post URL, queries media.mollygram.com.
+    Hybrid Extractor:
+    1. Instaloader (Python Native) - Best for Images/Carousels
+    2. yt-dlp (Video Engine) - Best for Reels/Videos
+    3. Mollygram (Web API) - Fallback
     Returns (media_links_list, debug_file_path).
     """
+    media_links = []
     
-    base_url = "https://media.mollygram.com/"
-    # Use raw URL to avoid encoding issues with some APIs
-    params = {'url': instagram_url}
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://mollygram.com/',
-        'Origin': 'https://mollygram.com',
-        'X-Requested-With': 'XMLHttpRequest'
-    }
-
-    debug_file = None
-    
+    # --- Strategy 1: Instaloader ---
     try:
-        logger.info(f"Fetching from Mollygram: {instagram_url}")
+        logger.info(f"Strategy 1 (Instaloader): {instagram_url}")
+        shortcode = None
+        if "/p/" in instagram_url:
+            shortcode = instagram_url.split("/p/")[1].split("/")[0].split("?")[0]
+        elif "/reel/" in instagram_url:
+            shortcode = instagram_url.split("/reel/")[1].split("/")[0].split("?")[0]
+            
+        if shortcode:
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            if post.typename == 'GraphSidecar':
+                for node in post.get_sidecar_nodes():
+                    if node.is_video:
+                        media_links.append(node.video_url)
+                    else:
+                        media_links.append(node.display_url)
+            elif post.is_video:
+                media_links.append(post.video_url)
+            else:
+                media_links.append(post.url)
+            
+            if media_links:
+                return media_links, None
+    except Exception as e:
+        logger.error(f"Instaloader failed: {e}")
+
+    # --- Strategy 2: yt-dlp ---
+    try:
+        logger.info(f"Strategy 2 (yt-dlp): {instagram_url}")
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            # 'cookiefile': 'cookies.txt' # Recommended if available
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(instagram_url, download=False)
+            if 'entries' in info:
+                for entry in info['entries']:
+                    url = entry.get('url')
+                    if url: media_links.append(url)
+            else:
+                url = info.get('url')
+                if url: media_links.append(url)
+                
+        if media_links:
+            return media_links, None
+    except Exception as e:
+         logger.error(f"yt-dlp failed: {e}")
+
+    # --- Strategy 3: Mollygram (fallback) ---
+    try:
+        logger.info(f"Strategy 3 (Mollygram): {instagram_url}")
+        base_url = "https://media.mollygram.com/"
+        params = {'url': instagram_url}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://mollygram.com/',
+             'Accept': 'application/json'
+        }
         response = requests.get(base_url, params=params, headers=headers, timeout=30)
         
-        # Save debug response for error tracing (if not 200)
-        if response.status_code != 200:
-             timestamp = int(time.time())
-             debug_filename = f"debug_{unique_id}_{timestamp}.html"
-             debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
-             with open(debug_file, "w", encoding="utf-8") as f:
-                 f.write(f"URL: {response.url}\nStatus: {response.status_code}\n\nBody:\n{response.text}")
-             return [], debug_file
-        
-        try:
+        if response.status_code == 200:
             data = response.json()
-        except Exception:
-             # If JSON fails, save debug
-             timestamp = int(time.time())
-             debug_filename = f"debug_{unique_id}_{timestamp}.txt"
-             debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
-             with open(debug_file, "w", encoding="utf-8") as f:
-                 f.write(f"Invalid JSON\nBody:\n{response.text}")
-             return [], debug_file
-
-        if data.get("status") != "ok":
-            # API explicitly returned error
-            timestamp = int(time.time())
-            debug_filename = f"debug_{unique_id}_{timestamp}.json"
-            debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
-            with open(debug_file, "w", encoding="utf-8") as f:
-                 f.write(response.text)
-            return [], debug_file
-
-        html_content = data.get("html", "")
-        if not html_content:
-            return [], debug_file
-
-        soup = BeautifulSoup(html_content, 'html.parser')
-        media_links = []
-        
-        # Find download buttons based on successful logs (id='download-video')
-        download_buttons = soup.find_all('a', id='download-video')
-        if not download_buttons:
-             # Fallback
-             download_buttons = soup.find_all('a', class_='bg-gradient-success')
-
-        for btn in download_buttons:
-            href = btn.get('href')
-            if href:
-                import html
-                decoded_href = html.unescape(href)
-                media_links.append(decoded_href)
-
-        return media_links, None
-    
+            if data.get("status") == "ok":
+                html_content = data.get("html", "")
+                soup = BeautifulSoup(html_content, 'html.parser')
+                download_buttons = soup.find_all('a', id='download-video')
+                if not download_buttons:
+                    download_buttons = soup.find_all('a', class_='bg-gradient-success')
+                for btn in download_buttons:
+                    href = btn.get('href')
+                    if href:
+                        import html
+                        media_links.append(html.unescape(href))
+                        
+        if media_links:
+            return media_links, None
+            
     except Exception as e:
-        logger.error(f"Request failed: {e}")
-        return [], None
+        logger.error(f"Mollygram failed: {e}")
+
+    # If all failed
+    timestamp = int(time.time())
+    debug_path = os.path.join(DOWNLOAD_DIR, f"error_final_{unique_id}_{timestamp}.txt")
+    with open(debug_path, "w") as f:
+        f.write("All strategies failed.")
+    return [], debug_path
 
 async def worker():
     """

@@ -45,84 +45,78 @@ except ImportError:
 
 def get_instagram_media_links(instagram_url, unique_id):
     """
-    Extracts media using anonstory.org API as explicitly requested.
+    Uses system cURL to fetch data from anonstory.org (Bypasses TLS fingerprinting issues).
     Returns (media_links_list, debug_file_path).
     """
     media_links = []
-    debug_file_path = None
     
-    # API Endpoint
-    api_url = "https://anonstory.org/content.php"
-    params = {'url': instagram_url}
+    # Clean URL for the API
+    encoded_url = instagram_url.strip()
     
-    # Headers to mimic a browser exactly
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Accept-Encoding': 'gzip, deflate, br', 
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Origin': 'https://anonstory.org',
-        'Referer': 'https://anonstory.org/'
-    }
-    
-    # Session to handle cookies automatically
-    session = requests.Session()
+    # Construct cURL command
+    # mimicking a real browser request exactly
+    curl_cmd = [
+        "curl", 
+        "-G", 
+        "https://anonstory.org/content.php",
+        "--data-urlencode", f"url={encoded_url}",
+        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "-H", "Accept: application/json, text/javascript, */*; q=0.01",
+        "-H", "X-Requested-With: XMLHttpRequest", 
+        "-H", "Referer: https://anonstory.org/",
+        "-H", "Accept-Language: en-US,en;q=0.9",
+        "--compressed",
+        "-s" # Silent mode
+    ]
 
     try:
-        # First visit the home page to get cookies
-        session.get("https://anonstory.org/", headers=headers, timeout=30)
+        logger.info(f"Fetching via cURL: {instagram_url}")
         
-        # Now make the actual request
-        response = session.get(api_url, params=params, headers=headers, timeout=30)
+        # Run cURL
+        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
         
-        # 1. Check HTTP Status
-        if response.status_code != 200:
-            timestamp = int(time.time())
-            debug_path = os.path.join(DOWNLOAD_DIR, f"error_http_{unique_id}_{timestamp}.txt")
-            with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(f"HTTP Error: {response.status_code}\n{response.text}")
-            return [], debug_path
-            
-        # 2. Parse JSON
+        if result.returncode != 0:
+            logger.error(f"cURL failed: {result.stderr}")
+            return [], None
+
+        response_text = result.stdout
+        
+        # Parse JSON
         try:
-            data = response.json()
+            import json
+            data = json.loads(response_text)
         except Exception:
+            # Save raw output for debugging
             timestamp = int(time.time())
-            debug_path = os.path.join(DOWNLOAD_DIR, f"error_json_{unique_id}_{timestamp}.txt")
+            debug_path = os.path.join(DOWNLOAD_DIR, f"error_curl_{unique_id}_{timestamp}.txt")
             with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(f"Invalid JSON:\n{response.text}")
+                f.write(f"Invalid JSON from cURL:\n{response_text}")
             return [], debug_path
 
-        # 3. Check API Status
         if data.get("status") != "ok":
-            # API explicitly returned error (e.g. "page not found")
             timestamp = int(time.time())
             debug_path = os.path.join(DOWNLOAD_DIR, f"error_api_{unique_id}_{timestamp}.txt")
             with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(response.text)
+                f.write(response_text)
             return [], debug_path
 
-        # 4. Parse HTML content
         html_content = data.get("html", "")
         if not html_content:
             return [], None
 
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Strategy: Look for the specific download buttons seen in user logs
-        # Class: "btn bg-gradient-success mb-0"
+        # Look for download buttons
         download_btns = soup.find_all('a', class_='btn bg-gradient-success')
         
         for btn in download_btns:
             href = btn.get('href')
             if href:
-                # Decode HTML entities (just in case)
                 import html
                 clean_link = html.unescape(href)
                 media_links.append(clean_link)
                 
-        # Deduplicate while preserving order
+        # Deduplicate
         seen = set()
         final_links = []
         for link in media_links:
@@ -133,12 +127,8 @@ def get_instagram_media_links(instagram_url, unique_id):
         return final_links, None
 
     except Exception as e:
-        logger.error(f"AnonStory Request failed: {e}")
-        timestamp = int(time.time())
-        debug_path = os.path.join(DOWNLOAD_DIR, f"error_except_{unique_id}_{timestamp}.txt")
-        with open(debug_path, "w") as f:
-            f.write(str(e))
-        return [], debug_path
+        logger.error(f"cURL execution failed: {e}")
+        return [], None
 
 async def worker():
     """

@@ -1,4 +1,5 @@
 import logging
+import time
 import asyncio
 import requests
 import os
@@ -58,7 +59,7 @@ def get_instagram_media_links(instagram_url):
                 logger.error(f"API returned status {response.status_code}")
                 # If 429/403, maybe wait a bit
                 if response.status_code in [429, 503]:
-                    await asyncio.sleep(2)
+                    time.sleep(2)
                     continue
                 continue # Try again or fail
             
@@ -93,7 +94,7 @@ def get_instagram_media_links(instagram_url):
         
         except Exception as e:
             logger.error(f"Request failed (Attempt {attempt+1}): {e}")
-            await asyncio.sleep(1)
+            time.sleep(1)
     
     return []
 

@@ -8,8 +8,8 @@ from telethon.errors import SessionPasswordNeededError
 
 # --- Configuration ---
 # API Credentials (ensure these are set in your VPS environment)
-API_ID = os.getenv('API_ID', '21439775') 
-API_HASH = os.getenv('API_HASH', '57cfda62a871fe4325a720613dc06927')
+API_ID = 38659771
+API_HASH = '6178147a40a23ade99f8b3a45f00e436'
 CONTROLLER_BOT_TOKEN = "8533327762:AAHR1D4CyFpMQQ4NztXhET6OL4wL1kHNkQ4" # The new bot token you provided
 
 # The bot you found that downloads media (You must set this!)

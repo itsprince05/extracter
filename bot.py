@@ -35,159 +35,101 @@ JOB_QUEUE = asyncio.Queue()
 
 # Auto-install dependencies if missing
 try:
-    import instaloader
-    import yt_dlp
     import requests
     from bs4 import BeautifulSoup
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from webdriver_manager.chrome import ChromeDriverManager
-    from selenium.webdriver.chrome.service import Service
 except ImportError:
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "instaloader", "yt-dlp", "requests", "beautifulsoup4", "selenium", "webdriver-manager"])
-    import instaloader
-    import yt_dlp
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4"])
     import requests
     from bs4 import BeautifulSoup
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from webdriver_manager.chrome import ChromeDriverManager
-    from selenium.webdriver.chrome.service import Service
-
-# Global Instaloader Instance
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False, 
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    compress_json=False
-)
 
 def get_instagram_media_links(instagram_url, unique_id):
     """
-    Hybrid Extractor:
-    1. Instaloader (Python Native) - Best for Images/Carousels
-    2. yt-dlp (Video Engine) - Best for Reels/Videos
-    3. Selenium Browser (Real User Simulation) - Fallback
+    Extracts media using anonstory.org API as explicitly requested.
     Returns (media_links_list, debug_file_path).
     """
     media_links = []
+    debug_file_path = None
     
-    # --- Strategy 1: Instaloader ---
-    try:
-        logger.info(f"Strategy 1 (Instaloader): {instagram_url}")
-        shortcode = None
-        if "/p/" in instagram_url:
-            shortcode = instagram_url.split("/p/")[1].split("/")[0].split("?")[0]
-        elif "/reel/" in instagram_url:
-            shortcode = instagram_url.split("/reel/")[1].split("/")[0].split("?")[0]
-            
-        if shortcode:
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-            if post.typename == 'GraphSidecar':
-                for node in post.get_sidecar_nodes():
-                    if node.is_video:
-                        media_links.append(node.video_url)
-                    else:
-                        media_links.append(node.display_url)
-            elif post.is_video:
-                media_links.append(post.video_url)
-            else:
-                media_links.append(post.url)
-            
-            if media_links:
-                return media_links, None
-    except Exception as e:
-        logger.error(f"Instaloader failed: {e}")
+    # API Endpoint
+    api_url = "https://anonstory.org/content.php"
+    params = {'url': instagram_url}
+    
+    # Headers to mimic a browser
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://anonstory.org/'
+    }
 
-    # --- Strategy 2: yt-dlp ---
     try:
-        logger.info(f"Strategy 2 (yt-dlp): {instagram_url}")
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(instagram_url, download=False)
-            if 'entries' in info:
-                for entry in info['entries']:
-                    url = entry.get('url')
-                    if url: media_links.append(url)
-            else:
-                url = info.get('url')
-                if url: media_links.append(url)
-                
-        if media_links:
-            return media_links, None
-    except Exception as e:
-         logger.error(f"yt-dlp failed: {e}")
-
-    # --- Strategy 3: Selenium Browser (Last Resort) ---
-    try:
-        logger.info(f"Strategy 3 (Selenium): {instagram_url}")
+        logger.info(f"Fetching from AnonStory: {instagram_url}")
+        response = requests.get(api_url, params=params, headers=headers, timeout=30)
         
-        chrome_options = Options()
-        chrome_options.add_argument("--headless") # Run in background
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        
-        # Setup Driver
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
+        # 1. Check HTTP Status
+        if response.status_code != 200:
+            timestamp = int(time.time())
+            debug_path = os.path.join(DOWNLOAD_DIR, f"error_http_{unique_id}_{timestamp}.txt")
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(f"HTTP Error: {response.status_code}\n{response.text}")
+            return [], debug_path
+            
+        # 2. Parse JSON
         try:
-            driver.get(instagram_url)
-            # Wait for content to load
-            time.sleep(5) 
-            
-            # Try to find video tag
-            videos = driver.find_elements(By.TAG_NAME, "video")
-            for video in videos:
-                src = video.get_attribute("src")
-                if src: media_links.append(src)
-            
-            # Try to find image tag (if no video)
-            if not media_links:
-                images = driver.find_elements(By.TAG_NAME, "img")
-                # Filter for main post image usually has strict sizes or classes, 
-                # but simple approach: get largest image or specific class if known.
-                # Inspecting 'src' often yields thumbnails, but let's try broadly.
-                for img in images:
-                    src = img.get_attribute("src")
-                    # Basic filter to avoid tiny icons/avatars
-                    if src and "150x150" not in src and "s150x150" not in src:
-                         pass 
-                         # Image logic is tricky without login due to overlays. 
-                         # Focusing on VIDEO support which is main pain point.
-            
-            # Specific check for 'poster' in video tag sometimes holds high res image
+            data = response.json()
+        except Exception:
+            timestamp = int(time.time())
+            debug_path = os.path.join(DOWNLOAD_DIR, f"error_json_{unique_id}_{timestamp}.txt")
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(f"Invalid JSON:\n{response.text}")
+            return [], debug_path
+
+        # 3. Check API Status
+        if data.get("status") != "ok":
+            # API explicitly returned error (e.g. "page not found")
+            timestamp = int(time.time())
+            debug_path = os.path.join(DOWNLOAD_DIR, f"error_api_{unique_id}_{timestamp}.txt")
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            return [], debug_path
+
+        # 4. Parse HTML content
+        html_content = data.get("html", "")
+        if not html_content:
+            return [], None
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Strategy: Look for the specific download buttons seen in user logs
+        # Class: "btn bg-gradient-success mb-0"
+        download_btns = soup.find_all('a', class_='btn bg-gradient-success')
+        
+        for btn in download_btns:
+            href = btn.get('href')
+            if href:
+                # Decode HTML entities (just in case)
+                import html
+                clean_link = html.unescape(href)
+                media_links.append(clean_link)
                 
-        finally:
-            driver.quit()
-            
-        if media_links:
-            return media_links, None
+        # Deduplicate while preserving order
+        seen = set()
+        final_links = []
+        for link in media_links:
+            if link not in seen:
+                final_links.append(link)
+                seen.add(link)
+                
+        return final_links, None
 
     except Exception as e:
-        logger.error(f"Selenium failed: {e}")
-
-    # If all failed
-    timestamp = int(time.time())
-    debug_path = os.path.join(DOWNLOAD_DIR, f"error_final_{unique_id}_{timestamp}.txt")
-    with open(debug_path, "w") as f:
-        f.write("All strategies failed (Instaloader, yt-dlp, Selenium).")
-    return [], debug_path
+        logger.error(f"AnonStory Request failed: {e}")
+        timestamp = int(time.time())
+        debug_path = os.path.join(DOWNLOAD_DIR, f"error_except_{unique_id}_{timestamp}.txt")
+        with open(debug_path, "w") as f:
+            f.write(str(e))
+        return [], debug_path
 
 async def worker():
     """

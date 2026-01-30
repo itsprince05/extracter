@@ -33,69 +33,82 @@ if not os.path.exists(DOWNLOAD_DIR):
 # Item format: (chat_id, url_string, index_in_batch, total_in_batch)
 JOB_QUEUE = asyncio.Queue()
 
-def get_instagram_media_links(instagram_url):
+def get_instagram_media_links(instagram_url, unique_id):
     """
-    Takes an Instagram post URL, queries media.mollygram.com,
-    and returns a list of media download URLs found in the response.
+    Takes an Instagram post URL, queries media.mollygram.com.
+    Returns (media_links_list, debug_file_path).
+    debug_file_path is None if successful or no debug info saved.
     """
     
     base_url = "https://media.mollygram.com/"
-    
-    # Use the raw URL as requested
     params = {'url': instagram_url}
-    
-    # Headers to mimic a browser
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
+    debug_file = None
+    
     try:
-        # Increase timeout slightly
         logger.info(f"Fetching from Mollygram: {instagram_url}")
         response = requests.get(base_url, params=params, headers=headers, timeout=30)
         
+        # Save debug response for user inspection
+        if response.status_code != 200 or True: # Always saving for now as requested/implied to debug "error"
+             # But let's only return it if we fail to find links, to avoid spam, 
+             # UNLESS the user specifically asked "links ka url response upload karo".
+             # Let's save it provisionally.
+             timestamp = int(time.time())
+             debug_filename = f"debug_{unique_id}_{timestamp}.html"
+             debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
+             with open(debug_file, "w", encoding="utf-8") as f:
+                 f.write(f"URL: {response.url}\nStatus: {response.status_code}\n\nBody:\n{response.text}")
+
         if response.status_code != 200:
-            logger.error(f"API returned status {response.status_code}")
-            return []
+            return [], debug_file
         
         try:
             data = response.json()
         except Exception:
-            logger.error(f"Error: content is not valid JSON. Content: {response.text[:200]}")
-            return []
+            return [], debug_file
 
         if data.get("status") != "ok":
-            logger.error(f"Error from API (Status not ok): {data}")
-            return []
+            return [], debug_file
 
         html_content = data.get("html", "")
         if not html_content:
-            return []
+            return [], debug_file
 
         soup = BeautifulSoup(html_content, 'html.parser')
         media_links = []
         
-        # Based on user logs, there are multiple elements with id="download-video" in carousels.
-        # BS4 finds all of them.
         download_buttons = soup.find_all('a', id='download-video')
-        
-        # Fallback if ID strategy fails (though logs show IDs are there)
         if not download_buttons:
              download_buttons = soup.find_all('a', class_='bg-gradient-success')
 
         for btn in download_buttons:
             href = btn.get('href')
             if href:
-                # Decode HTML entities (e.g., &amp; -> &)
                 import html
                 decoded_href = html.unescape(href)
                 media_links.append(decoded_href)
 
-        return media_links
+        if media_links:
+            # If success, we might not want to send the debug file unless requested.
+            # But if the user says "it gives error", maybe we send it only on empty list.
+            if os.path.exists(debug_file):
+                os.remove(debug_file)
+            return media_links, None
+            
+        return [], debug_file
     
     except Exception as e:
         logger.error(f"Request failed: {e}")
-        return []
+        # Create a simple debug file with the error
+        if not debug_file:
+             debug_file = os.path.join(DOWNLOAD_DIR, f"error_{unique_id}.txt")
+             with open(debug_file, "w") as f:
+                 f.write(f"Exception occurred: {e}")
+        return [], debug_file
 
 async def worker():
     """
@@ -109,6 +122,7 @@ async def worker():
         
         # Determine Cleaned URL (for caption only)
         cleaned_url = original_url.split('?')[0].rstrip('/')
+        unique_req_id = f"{chat_id}_{idx}"
         
         # Send Status Message
         try:
@@ -120,11 +134,21 @@ async def worker():
 
         try:
             # 1. Extract Links
-            media_links = await asyncio.to_thread(get_instagram_media_links, original_url)
+            media_links, debug_file = await asyncio.to_thread(get_instagram_media_links, original_url, unique_req_id)
             
             if not media_links:
                 # ERROR: Send RAW URL
                 await bot.send_message(ERROR_GROUP_ID, f"Error - No Media Found\n{original_url}", link_preview=False)
+                
+                # Upload Debug File
+                if debug_file and os.path.exists(debug_file):
+                    try:
+                        await bot.send_file(ERROR_GROUP_ID, debug_file, caption="Debug Response From API")
+                    except Exception as e:
+                        logger.error(f"Failed to send debug file: {e}")
+                    finally:
+                        os.remove(debug_file)
+
                 await status_msg.delete()
                 JOB_QUEUE.task_done()
                 

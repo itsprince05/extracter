@@ -33,7 +33,24 @@ if not os.path.exists(DOWNLOAD_DIR):
 # Item format: (chat_id, url_string, index_in_batch, total_in_batch)
 JOB_QUEUE = asyncio.Queue()
 
-import instaloader
+# Auto-install dependencies if missing
+try:
+    import instaloader
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "instaloader"])
+    import instaloader
+
+# Global Instaloader Instance (Reuse to manage sessions/rate-limits better)
+L = instaloader.Instaloader(
+    download_pictures=False,
+    download_videos=False, 
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    compress_json=False
+)
 
 def get_instagram_media_links(instagram_url, unique_id):
     """
@@ -42,17 +59,6 @@ def get_instagram_media_links(instagram_url, unique_id):
     """
     media_links = []
     debug_file_path = None
-    
-    # Initialize Instaloader
-    L = instaloader.Instaloader(
-        download_pictures=False,
-        download_videos=False, 
-        download_video_thumbnails=False,
-        download_geotags=False,
-        download_comments=False,
-        save_metadata=False,
-        compress_json=False
-    )
 
     try:
         logger.info(f"Extracting with Instaloader: {instagram_url}")
@@ -293,25 +299,33 @@ async def update_handler(event):
 
     msg = await event.reply("Checking for updates...")
     try:
+        # 1. Git Pull
         process = await asyncio.create_subprocess_shell(
             "git pull",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        
         output = stdout.decode().strip() or stderr.decode().strip()
         
-        if "Already up to date" in output:
-            await msg.edit(f"Bot is already up to date.\n`{output}`")
-        else:
-            await msg.edit(f"Update successful!\n`{output}`\nRestarting bot...")
-            
-            # Prepare args for restart, ensuring 'updated' flag is present
-            new_args = [arg for arg in sys.argv if arg != 'updated']
-            new_args.append('updated')
-            
-            os.execl(sys.executable, sys.executable, *new_args)
+        await msg.edit(f"Git Pulled.\n{output}\nInstalling requirements...")
+        
+        # 2. Pip Install
+        process_pip = await asyncio.create_subprocess_shell(
+            f"{sys.executable} -m pip install -r requirements.txt",
+             stdout=asyncio.subprocess.PIPE,
+             stderr=asyncio.subprocess.PIPE
+        )
+        stdout_pip, stderr_pip = await process_pip.communicate()
+        
+        # 3. Restart
+        await msg.edit(f"Update successful!\nRestarting bot...")
+        
+        # Prepare args for restart, ensuring 'updated' flag is present
+        new_args = [arg for arg in sys.argv if arg != 'updated']
+        new_args.append('updated')
+        
+        os.execl(sys.executable, sys.executable, *new_args)
             
     except Exception as e:
         await msg.edit(f"Update failed: {e}")

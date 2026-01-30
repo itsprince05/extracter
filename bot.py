@@ -33,50 +33,67 @@ if not os.path.exists(DOWNLOAD_DIR):
 # Item format: (chat_id, url_string, index_in_batch, total_in_batch)
 JOB_QUEUE = asyncio.Queue()
 
-import yt_dlp
+import instaloader
 
 def get_instagram_media_links(instagram_url, unique_id):
     """
-    Uses yt-dlp to extract media links.
+    Uses Instaloader to extract media links (Images & Videos).
     Returns (media_links_list, debug_file_path).
     """
     media_links = []
     debug_file_path = None
     
-    # Configure yt-dlp
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'best', # Get best quality
-        'extract_flat': False, # We need deep extraction
-        # 'cookiefile': 'cookies.txt', # Should be added if user has cookies
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    }
+    # Initialize Instaloader
+    L = instaloader.Instaloader(
+        download_pictures=False,
+        download_videos=False, 
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False
+    )
 
     try:
-        logger.info(f"Extracting with yt-dlp: {instagram_url}")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(instagram_url, download=False)
+        logger.info(f"Extracting with Instaloader: {instagram_url}")
+        
+        # Extract Shortcode
+        shortcode = None
+        if "/p/" in instagram_url:
+            shortcode = instagram_url.split("/p/")[1].split("/")[0].split("?")[0]
+        elif "/reel/" in instagram_url:
+            shortcode = instagram_url.split("/reel/")[1].split("/")[0].split("?")[0]
+        
+        if not shortcode:
+            logger.error("Could not parse shortcode")
+            return [], None
+
+        # Fetch Post
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        
+        # 1. Carousel (Sidecar)
+        if post.typename == 'GraphSidecar':
+            for node in post.get_sidecar_nodes():
+                if node.is_video:
+                    media_links.append(node.video_url)
+                else:
+                    media_links.append(node.display_url)
+        
+        # 2. Single Video
+        elif post.is_video:
+            media_links.append(post.video_url)
             
-            if 'entries' in info:
-                # It's a playlist or carousel
-                for entry in info['entries']:
-                    url = entry.get('url')
-                    if url:
-                        media_links.append(url)
-            else:
-                # Single video/image
-                url = info.get('url')
-                if url:
-                    media_links.append(url)
-                    
+        # 3. Single Image
+        else:
+            media_links.append(post.url)
+
         return media_links, None
 
     except Exception as e:
-        logger.error(f"yt-dlp failed: {e}")
+        logger.error(f"Instaloader failed: {e}")
         # Save error to debug file
         timestamp = int(time.time())
-        debug_filename = f"error_ytdlp_{unique_id}_{timestamp}.txt"
+        debug_filename = f"error_instaloader_{unique_id}_{timestamp}.txt"
         debug_file_path = os.path.join(DOWNLOAD_DIR, debug_filename)
         with open(debug_file_path, "w") as f:
             f.write(str(e))

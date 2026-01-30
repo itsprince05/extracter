@@ -38,6 +38,19 @@ user = TelegramClient("user_session", API_ID, API_HASH)
 LOGIN_STATE = {'phone': None, 'otp_requested': False, 'hash': None}
 LINK_QUEUE = asyncio.Queue()
 IS_PROCESSING = False
+BRIDGE_QUEUE = asyncio.Queue()
+OWNER_ID = None
+
+# --- Bridge Listener (Fixes API Restriction) ---
+@bot.on(events.NewMessage())
+async def bridge_listener(event):
+    # Only capture private media messages from the User Client (Owner)
+    if not OWNER_ID: return
+    if event.is_private and event.sender_id == OWNER_ID and event.media:
+        # Ignore text-only messages unless they are captions? 
+        # The user sends with caption="bridge_transfer", so we can check that too/
+        if event.text == "bridge_transfer":
+            await BRIDGE_QUEUE.put(event.message)
 
 # --- Controller Bot (Interacts with YOU) ---
 
@@ -175,7 +188,7 @@ async def message_handler(event):
 # --- User Client Processing Logic ---
 
 async def process_queue(notify_chat_id):
-    global IS_PROCESSING
+    global IS_PROCESSING, OWNER_ID
     IS_PROCESSING = True
     
     if not user.is_connected():
@@ -184,6 +197,7 @@ async def process_queue(notify_chat_id):
     try:
         bot_info = await bot.get_me()
         user_info = await user.get_me()
+        OWNER_ID = user_info.id # Register Owner ID for Bridge Listener
     except Exception as e:
         logger.error(f"Setup Error: {e}")
         IS_PROCESSING = False
@@ -204,7 +218,7 @@ async def process_queue(notify_chat_id):
                 
                 # --- Phase 1: Search ---
                 start_time = asyncio.get_event_loop().time()
-                while (asyncio.get_event_loop().time() - start_time) < 50:
+                while (asyncio.get_event_loop().time() - start_time) < 45:
                     try:
                         response = await conv.get_response()
                         messages_to_cleanup.append(response.id)
@@ -217,11 +231,9 @@ async def process_queue(notify_chat_id):
 
                     text_lower = response.text.lower() if response.text else ""
                     
-                    # Ignore known status text
+                    # Ignore status/emojis
                     if "я начал качать" in text_lower or "подождите" in text_lower or "film_4k_bot" in text_lower:
                         continue
-                    
-                    # Ignore Emojis / Short responses
                     if len(response.text) < 5:
                         continue
 
@@ -254,19 +266,37 @@ async def process_queue(notify_chat_id):
                     try:
                         # BRIDGE: User -> Bot -> Group
                         
-                        # A. User sends to Bot
-                        # Sending to 'bot_info' Entity is safer than username
-                        bridge_msg = await user.send_file(
+                        # 0. Flush Bridge Queue (Safety)
+                        while not BRIDGE_QUEUE.empty():
+                            BRIDGE_QUEUE.get_nowait()
+                        
+                        # A. User sends to Bot (Private)
+                        await user.send_file(
                             bot_info, 
                             media_list, 
                             caption="bridge_transfer"
                         )
                         
-                        # B. Bot picks it up
-                        await asyncio.sleep(0.5) # Wait for propagation
+                        # B. Bot Receives via Listener (Queue)
+                        bridge_msgs = []
+                        # We expect exactly len(media_list) bridge messages
+                        wait_start = asyncio.get_event_loop().time()
+                        while len(bridge_msgs) < len(media_list):
+                            if (asyncio.get_event_loop().time() - wait_start) > 10:
+                                break # Timeout
+                            try:
+                                # Wait for message to arrive in queue
+                                msg = await asyncio.wait_for(BRIDGE_QUEUE.get(), timeout=2.0)
+                                bridge_msgs.append(msg)
+                            except asyncio.TimeoutError:
+                                break
                         
-                        bridge_msgs = await bot.get_messages(user_info.id, limit=len(media_list))
-                        bridge_msgs.reverse() 
+                        # Reverse? Queue preserves order order usually, but let's check.
+                        # User sends list -> Telethon sends album or individual?
+                        # Telethon send_file with list sends as Album.
+                        # Listener will catch them as they arrive.
+                        # Usually they arrive in order.
+                        
                         media_refs = [m.media for m in bridge_msgs if m.media]
                         
                         if media_refs:
@@ -284,7 +314,7 @@ async def process_queue(notify_chat_id):
                                 await user.delete_messages(TARGET_PRIMARY, messages_to_cleanup)
                                 
                         else:
-                            raise Exception("Bot could not find media in DM")
+                            raise Exception("Bridge Queue Timeout or Empty")
                         
                     except Exception as e:
                         logger.error(f"Bridge Error: {e}")

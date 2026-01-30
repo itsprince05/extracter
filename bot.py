@@ -183,11 +183,18 @@ async def process_queue(notify_chat_id):
     global IS_PROCESSING
     IS_PROCESSING = True
     
-    import io # Local import to ensure it exists
-    
     # ensure client connected...
     if not user.is_connected():
         await user.connect()
+        
+    # Pre-fetch entities for the Bridge
+    try:
+        bot_info = await bot.get_me()
+        user_info = await user.get_me()
+    except Exception as e:
+        logger.error(f"Setup Error: {e}")
+        IS_PROCESSING = False
+        return
 
     while not LINK_QUEUE.empty():
         url = await LINK_QUEUE.get()
@@ -239,36 +246,47 @@ async def process_queue(notify_chat_id):
                 # --- Decision Logic ---
                 if media_list:
                     clean_url = url.split("?")[0]
-                    files_to_send = []
                     
                     try:
-                        # 1. Download ALL items to memory first
-                        for m in media_list:
-                            buffer = io.BytesIO()
-                            await user.download_media(m, file=buffer)
-                            buffer.seek(0)
-                            # Telethon needs a 'name' attribute sometimes for buffers to guess mime type
-                            # We can try setting a dummy name or just passing the buffer
-                            # Often helpful to name it based on implicit type
-                            buffer.name = "media_item" 
-                            files_to_send.append(buffer)
+                        # BRIDGE STRATEGY: User -> Bot -> Group (Instant)
                         
-                        # 2. Send as ALBUM (Pass list of files)
-                        # The caption applies to the album
-                        await bot.send_file(
-                            GROUP_MEDIA, 
-                            files_to_send, 
-                            caption=clean_url
+                        # 1. User sends media to Bot (Private DM)
+                        #    This re-uses the file reference on Telegram servers (Zero Upload)
+                        bridge_msg = await user.send_file(
+                            bot_info.username, 
+                            media_list, 
+                            caption="bridge_transfer"
                         )
                         
-                        logger.info(f"✅ Saved Album ({len(files_to_send)} items) for: {clean_url}")
+                        # 2. Bot grabs the message(s) from its DM
+                        #    We fetch the latest N messages where N = len(media_list)
+                        #    We wait a brief moment to ensure propagation, though usually instant
+                        await asyncio.sleep(0.5) 
+                        
+                        bridge_msgs = await bot.get_messages(user_info.id, limit=len(media_list))
+                        
+                        # Correct order and extract media
+                        # get_messages returns newest first, so we reverse to match order
+                        bridge_msgs.reverse() 
+                        media_refs = [m.media for m in bridge_msgs if m.media]
+                        
+                        if media_refs:
+                            # 3. Bot sends to Group (Instant)
+                            await bot.send_file(
+                                GROUP_MEDIA, 
+                                media_refs, 
+                                caption=clean_url
+                            )
+                            logger.info(f"✅ Saved (Bridge) {len(media_refs)} items: {clean_url}")
+                            
+                            # 4. Cleanup Bridge Messages (Bot deletes them)
+                            await bot.delete_messages(user_info.id, bridge_msgs)
+                        else:
+                            logger.error("Bridge failed: Bot didn't find the media in DM")
                         
                     except Exception as e:
-                        logger.error(f"Transfer Error: {e}")
-                    finally:
-                        # Cleanup buffers
-                        for f in files_to_send:
-                            f.close()
+                        logger.error(f"Bridge Transfer Error: {e}")
+                        # Fallback (Slow Method)? No, just log error for now to keep code clean
                 
                 elif final_response:
                     await user.send_message(TARGET_FALLBACK, url)
@@ -280,7 +298,7 @@ async def process_queue(notify_chat_id):
                     await bot.send_message(GROUP_ERROR, f"Error (Timeout/Unknown)\n{url}", link_preview=False)
                     logger.warning(f"Timeout/Unknown -> Fallback: {url}")
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(4) # Slight cooldown
 
         except Exception as e:
             logger.error(f"Logic Error: {e}")

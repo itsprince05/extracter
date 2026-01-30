@@ -45,89 +45,73 @@ except ImportError:
 
 def get_instagram_media_links(instagram_url, unique_id):
     """
-    Uses system cURL to fetch data from anonstory.org (Bypasses TLS fingerprinting issues).
+    Uses ddinstagram.com to extract media.
+    This is an unlimited, free public service often used for Discord embeds.
     Returns (media_links_list, debug_file_path).
     """
     media_links = []
     
-    # Clean URL for the API
-    encoded_url = instagram_url.strip()
+    # Transform URL to ddinstagram
+    # e.g., instagram.com/p/XYZ -> ddinstagram.com/p/XYZ
+    dd_url = instagram_url.replace("instagram.com", "ddinstagram.com")
+    dd_url = dd_url.replace("www.", "")
     
-    # Construct cURL command
-    # mimicking a real browser request exactly
-    curl_cmd = [
-        "curl", 
-        "-G", 
-        "https://anonstory.org/content.php",
-        "--data-urlencode", f"url={encoded_url}",
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "-H", "Accept: application/json, text/javascript, */*; q=0.01",
-        "-H", "X-Requested-With: XMLHttpRequest", 
-        "-H", "Referer: https://anonstory.org/",
-        "-H", "Accept-Language: en-US,en;q=0.9",
-        "--compressed",
-        "-s" # Silent mode
-    ]
-
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+    
     try:
-        logger.info(f"Fetching via cURL: {instagram_url}")
+        logger.info(f"Fetching via ddinstagram: {dd_url}")
         
-        # Run cURL
-        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
+        # We need to fetch the HTML of ddinstagram, which contains the direct video/image links
+        # in its <meta> tags for Discord preview.
+        response = requests.get(dd_url, headers=headers, timeout=30)
         
-        if result.returncode != 0:
-            logger.error(f"cURL failed: {result.stderr}")
-            return [], None
-
-        response_text = result.stdout
-        
-        # Parse JSON
-        try:
-            import json
-            data = json.loads(response_text)
-        except Exception:
-            # Save raw output for debugging
+        if response.status_code != 200:
             timestamp = int(time.time())
-            debug_path = os.path.join(DOWNLOAD_DIR, f"error_curl_{unique_id}_{timestamp}.txt")
+            debug_path = os.path.join(DOWNLOAD_DIR, f"error_dd_{unique_id}_{timestamp}.txt")
             with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(f"Invalid JSON from cURL:\n{response_text}")
+                f.write(f"Status: {response.status_code}\n{response.text}")
             return [], debug_path
-
-        if data.get("status") != "ok":
-            timestamp = int(time.time())
-            debug_path = os.path.join(DOWNLOAD_DIR, f"error_api_{unique_id}_{timestamp}.txt")
-            with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(response_text)
-            return [], debug_path
-
-        html_content = data.get("html", "")
-        if not html_content:
-            return [], None
-
-        soup = BeautifulSoup(html_content, 'html.parser')
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Look for download buttons
-        download_btns = soup.find_all('a', class_='btn bg-gradient-success')
+        # ddinstagram (and similar services) put the direct video link in:
+        # <meta property="og:video" content="..." />
+        # <meta property="og:image" content="..." />
         
-        for btn in download_btns:
-            href = btn.get('href')
-            if href:
-                import html
-                clean_link = html.unescape(href)
-                media_links.append(clean_link)
+        # 1. Check for Video
+        meta_video = soup.find("meta", property="og:video")
+        if meta_video:
+            content = meta_video.get("content")
+            if content:
+                media_links.append(content)
                 
-        # Deduplicate
-        seen = set()
-        final_links = []
-        for link in media_links:
-            if link not in seen:
-                final_links.append(link)
-                seen.add(link)
-                
-        return final_links, None
+        # 2. Check for Image (only if no video, or maybe it's a carousel?)
+        # ddinstagram usually points to the main content.
+        if not media_links:
+             meta_image = soup.find("meta", property="og:image")
+             if meta_image:
+                 content = meta_image.get("content")
+                 if content:
+                     media_links.append(content)
+                     
+        # 3. Handle Carousel (Sidecar) if supported by ddinstagram
+        # Sometimes they expose multiple tags or a json blob. 
+        # For now, we take what matches standard OG tags.
+        
+        if not media_links:
+             # Fallback debug
+             timestamp = int(time.time())
+             debug_path = os.path.join(DOWNLOAD_DIR, f"error_nomedia_{unique_id}_{timestamp}.html")
+             with open(debug_path, "w", encoding="utf-8") as f:
+                 f.write(response.text)
+             return [], debug_path
+
+        return media_links, None
 
     except Exception as e:
-        logger.error(f"cURL execution failed: {e}")
+        logger.error(f"ddinstagram Request failed: {e}")
         return [], None
 
 async def worker():

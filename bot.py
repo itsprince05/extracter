@@ -104,6 +104,12 @@ async def message_handler(event):
     # Ignore commands
     if event.message.text.startswith('/'): return
     
+    # CRITICAL LOOP PROTECTION:
+    # Ignore messages in the Output Groups (Media/Error)
+    # Otherwise, the bot sees its own output (URL caption) and re-queues it infinitely.
+    if event.chat_id in [GROUP_MEDIA, GROUP_ERROR]:
+        return
+    
     chat_id = event.chat_id
     text = event.message.text.strip()
     
@@ -161,21 +167,21 @@ async def message_handler(event):
     if urls:
         count = 0
         for url in urls:
-            # Deduplication Check
-            if url not in SEEN_LINKS:
-                SEEN_LINKS.add(url)
-                await LINK_QUEUE.put(url)
-                count += 1
+            # No Deduplication (User can send duplicates if they want)
+            # Loop protection is handled by ignoring group chats above
+            await LINK_QUEUE.put(url)
+            count += 1
         
         q_size = LINK_QUEUE.qsize()
         if count > 0:
-            await event.respond(f"✅ Added {count} new links to queue.\nTotal in Queue: {q_size}\n\nProcessing started.")
+            msg = f"✅ Added {count} links to queue.\nTotal in Queue: {q_size}\nProcessing..."
+            # Only respond if it's a DM, to avoid spamming groups if we ever add group support back
+            if event.is_private:
+                await event.respond(msg)
             
             global IS_PROCESSING
             if not IS_PROCESSING:
                 asyncio.create_task(process_queue(event.chat_id))
-        else:
-            await event.respond(f"⚠️ Ignored duplicates. Queue size: {q_size}")
 
 # --- User Client Processing Logic ---
 

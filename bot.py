@@ -35,76 +35,87 @@ JOB_QUEUE = asyncio.Queue()
 
 # Auto-install dependencies if missing
 try:
-    import instaloader
+    import requests
+    from bs4 import BeautifulSoup
 except ImportError:
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "instaloader"])
-    import instaloader
-
-# Global Instaloader Instance (Reuse to manage sessions/rate-limits better)
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False, 
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    compress_json=False
-)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4"])
+    import requests
+    from bs4 import BeautifulSoup
 
 def get_instagram_media_links(instagram_url, unique_id):
     """
-    Uses Instaloader to extract media links (Images & Videos).
+    Takes an Instagram post URL, queries media.mollygram.com.
     Returns (media_links_list, debug_file_path).
     """
-    media_links = []
-    debug_file_path = None
+    
+    base_url = "https://media.mollygram.com/"
+    # Use raw URL to avoid encoding issues with some APIs
+    params = {'url': instagram_url}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
 
+    debug_file = None
+    
     try:
-        logger.info(f"Extracting with Instaloader: {instagram_url}")
+        logger.info(f"Fetching from Mollygram: {instagram_url}")
+        response = requests.get(base_url, params=params, headers=headers, timeout=30)
         
-        # Extract Shortcode
-        shortcode = None
-        if "/p/" in instagram_url:
-            shortcode = instagram_url.split("/p/")[1].split("/")[0].split("?")[0]
-        elif "/reel/" in instagram_url:
-            shortcode = instagram_url.split("/reel/")[1].split("/")[0].split("?")[0]
+        # Save debug response for error tracing (if not 200)
+        if response.status_code != 200:
+             timestamp = int(time.time())
+             debug_filename = f"debug_{unique_id}_{timestamp}.html"
+             debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
+             with open(debug_file, "w", encoding="utf-8") as f:
+                 f.write(f"URL: {response.url}\nStatus: {response.status_code}\n\nBody:\n{response.text}")
+             return [], debug_file
         
-        if not shortcode:
-            logger.error("Could not parse shortcode")
-            return [], None
+        try:
+            data = response.json()
+        except Exception:
+             # If JSON fails, save debug
+             timestamp = int(time.time())
+             debug_filename = f"debug_{unique_id}_{timestamp}.txt"
+             debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
+             with open(debug_file, "w", encoding="utf-8") as f:
+                 f.write(f"Invalid JSON\nBody:\n{response.text}")
+             return [], debug_file
 
-        # Fetch Post
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        if data.get("status") != "ok":
+            # API explicitly returned error
+            timestamp = int(time.time())
+            debug_filename = f"debug_{unique_id}_{timestamp}.json"
+            debug_file = os.path.join(DOWNLOAD_DIR, debug_filename)
+            with open(debug_file, "w", encoding="utf-8") as f:
+                 f.write(response.text)
+            return [], debug_file
+
+        html_content = data.get("html", "")
+        if not html_content:
+            return [], debug_file
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+        media_links = []
         
-        # 1. Carousel (Sidecar)
-        if post.typename == 'GraphSidecar':
-            for node in post.get_sidecar_nodes():
-                if node.is_video:
-                    media_links.append(node.video_url)
-                else:
-                    media_links.append(node.display_url)
-        
-        # 2. Single Video
-        elif post.is_video:
-            media_links.append(post.video_url)
-            
-        # 3. Single Image
-        else:
-            media_links.append(post.url)
+        # Find download buttons based on successful logs (id='download-video')
+        download_buttons = soup.find_all('a', id='download-video')
+        if not download_buttons:
+             # Fallback
+             download_buttons = soup.find_all('a', class_='bg-gradient-success')
+
+        for btn in download_buttons:
+            href = btn.get('href')
+            if href:
+                import html
+                decoded_href = html.unescape(href)
+                media_links.append(decoded_href)
 
         return media_links, None
-
+    
     except Exception as e:
-        logger.error(f"Instaloader failed: {e}")
-        # Save error to debug file
-        timestamp = int(time.time())
-        debug_filename = f"error_instaloader_{unique_id}_{timestamp}.txt"
-        debug_file_path = os.path.join(DOWNLOAD_DIR, debug_filename)
-        with open(debug_file_path, "w") as f:
-            f.write(str(e))
-            
-        return [], debug_file_path
+        logger.error(f"Request failed: {e}")
+        return [], None
 
 async def worker():
     """
@@ -186,7 +197,11 @@ async def worker():
 
                         # Strategy 1: Direct URL
                         try:
-                            r = await asyncio.to_thread(perform_request, url)
+                            # Decode HTML entities again just in case (e.g. &amp;)
+                            import html
+                            clean_url = html.unescape(url)
+                            
+                            r = await asyncio.to_thread(perform_request, clean_url)
                             
                             # Check if we got a valid media response
                             content_type = r.headers.get('Content-Type', '')
@@ -200,7 +215,7 @@ async def worker():
                                 await asyncio.to_thread(save_file, r, final_path)
                                 return final_path, is_video
                             else:
-                                await send_debug(f"Strategy 1 failed. Status: {r.status_code}, Type: {content_type}\nURL: {url[:50]}...")
+                                await send_debug(f"Strategy 1 failed. Status: {r.status_code}, Type: {content_type}\nURL: {clean_url[:50]}...")
                                 
                         except Exception as e:
                              await send_debug(f"Strategy 1 Error: {e}")
@@ -275,7 +290,6 @@ async def worker():
             except:
                 pass
         
-        # Mark task as done and wait a bit
         # Mark task as done and wait a bit
         JOB_QUEUE.task_done()
         

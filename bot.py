@@ -53,7 +53,12 @@ def get_instagram_media_links(instagram_url, unique_id):
     # Use raw URL to avoid encoding issues with some APIs
     params = {'url': instagram_url}
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://mollygram.com/',
+        'Origin': 'https://mollygram.com',
+        'X-Requested-With': 'XMLHttpRequest'
     }
 
     debug_file = None

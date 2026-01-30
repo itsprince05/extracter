@@ -55,17 +55,26 @@ def get_instagram_media_links(instagram_url, unique_id):
     api_url = "https://anonstory.org/content.php"
     params = {'url': instagram_url}
     
-    # Headers to mimic a browser
+    # Headers to mimic a browser exactly
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Encoding': 'gzip, deflate, br', 
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         'X-Requested-With': 'XMLHttpRequest',
+        'Origin': 'https://anonstory.org',
         'Referer': 'https://anonstory.org/'
     }
+    
+    # Session to handle cookies automatically
+    session = requests.Session()
 
     try:
-        logger.info(f"Fetching from AnonStory: {instagram_url}")
-        response = requests.get(api_url, params=params, headers=headers, timeout=30)
+        # First visit the home page to get cookies
+        session.get("https://anonstory.org/", headers=headers, timeout=30)
+        
+        # Now make the actual request
+        response = session.get(api_url, params=params, headers=headers, timeout=30)
         
         # 1. Check HTTP Status
         if response.status_code != 200:

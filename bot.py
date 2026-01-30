@@ -38,19 +38,6 @@ user = TelegramClient("user_session", API_ID, API_HASH)
 LOGIN_STATE = {'phone': None, 'otp_requested': False, 'hash': None}
 LINK_QUEUE = asyncio.Queue()
 IS_PROCESSING = False
-BRIDGE_QUEUE = asyncio.Queue()
-OWNER_ID = None
-
-# --- Bridge Listener (Fixes API Restriction) ---
-@bot.on(events.NewMessage())
-async def bridge_listener(event):
-    # Only capture private media messages from the User Client (Owner)
-    if not OWNER_ID: return
-    if event.is_private and event.sender_id == OWNER_ID and event.media:
-        # Ignore text-only messages unless they are captions? 
-        # The user sends with caption="bridge_transfer", so we can check that too/
-        if event.text == "bridge_transfer":
-            await BRIDGE_QUEUE.put(event.message)
 
 # --- Controller Bot (Interacts with YOU) ---
 
@@ -60,8 +47,6 @@ async def start_handler(event):
         "**Multi-Link Reflector Bot** 🤖\n\n"
         "1. **/login** - Login your User Account (required).\n"
         "2. **Send Links** - Send Instagram links here (bulk supported).\n\n"
-        f"**Routing:**\nPrimary: `{TARGET_PRIMARY}`\nFallback: `{TARGET_FALLBACK}`\n"
-        f"Media Group: `{GROUP_MEDIA}`\nError Group: `{GROUP_ERROR}`"
     )
 
 @bot.on(events.NewMessage(pattern='/login'))
@@ -179,7 +164,7 @@ async def message_handler(event):
             count += 1
         
         q_size = LINK_QUEUE.qsize()
-        await event.respond(f"✅ Added {count} links to queue.\nTotal in Queue: {q_size}\n\nProcessing started if target set.")
+        await event.respond(f"✅ Added {count} links to queue.\nTotal in Queue: {q_size}\n\nProcessing started.")
         
         global IS_PROCESSING
         if not IS_PROCESSING:
@@ -188,16 +173,20 @@ async def message_handler(event):
 # --- User Client Processing Logic ---
 
 async def process_queue(notify_chat_id):
-    global IS_PROCESSING, OWNER_ID
+    global IS_PROCESSING
     IS_PROCESSING = True
     
     if not user.is_connected():
         await user.connect()
         
     try:
-        bot_info = await bot.get_me()
-        user_info = await user.get_me()
-        OWNER_ID = user_info.id # Register Owner ID for Bridge Listener
+        # Ensure user client is authorized and get its info if needed for future features
+        if not await user.is_user_authorized():
+            logger.error("User client not authorized, cannot process queue.")
+            await bot.send_message(notify_chat_id, "❌ User client not logged in. Please /login.")
+            IS_PROCESSING = False
+            return
+        # user_info = await user.get_me() # Not strictly needed for direct send, but kept for context if desired
     except Exception as e:
         logger.error(f"Setup Error: {e}")
         IS_PROCESSING = False
@@ -230,8 +219,6 @@ async def process_queue(notify_chat_id):
                         break 
 
                     text_lower = response.text.lower() if response.text else ""
-                    
-                    # Ignore status/emojis
                     if "я начал качать" in text_lower or "подождите" in text_lower or "film_4k_bot" in text_lower:
                         continue
                     if len(response.text) < 5:
@@ -243,7 +230,6 @@ async def process_queue(notify_chat_id):
                         if sig.lower() in text_lower:
                             is_error = True
                             break
-                    
                     if is_error:
                         final_response = response 
                         break 
@@ -264,72 +250,36 @@ async def process_queue(notify_chat_id):
                     clean_url = url.split("?")[0]
                     
                     try:
-                        # BRIDGE: User -> Bot -> Group
+                        # DIRECT STRATEGY: User -> Group (Instant & Clean)
+                        # We pass the media objects directly. Telethon handles the file ref copy.
+                        # This avoids downloading/uploading and avoids Bot API limits.
                         
-                        # 0. Flush Bridge Queue (Safety)
-                        while not BRIDGE_QUEUE.empty():
-                            BRIDGE_QUEUE.get_nowait()
-                        
-                        # A. User sends to Bot (Private)
                         await user.send_file(
-                            bot_info, 
+                            GROUP_MEDIA, 
                             media_list, 
-                            caption="bridge_transfer"
+                            caption=clean_url
                         )
+                        logger.info(f"✅ Saved (Direct) {len(media_list)} items")
                         
-                        # B. Bot Receives via Listener (Queue)
-                        bridge_msgs = []
-                        # We expect exactly len(media_list) bridge messages
-                        wait_start = asyncio.get_event_loop().time()
-                        while len(bridge_msgs) < len(media_list):
-                            if (asyncio.get_event_loop().time() - wait_start) > 10:
-                                break # Timeout
-                            try:
-                                # Wait for message to arrive in queue
-                                msg = await asyncio.wait_for(BRIDGE_QUEUE.get(), timeout=2.0)
-                                bridge_msgs.append(msg)
-                            except asyncio.TimeoutError:
-                                break
-                        
-                        # Reverse? Queue preserves order order usually, but let's check.
-                        # User sends list -> Telethon sends album or individual?
-                        # Telethon send_file with list sends as Album.
-                        # Listener will catch them as they arrive.
-                        # Usually they arrive in order.
-                        
-                        media_refs = [m.media for m in bridge_msgs if m.media]
-                        
-                        if media_refs:
-                            # C. Bot sends to Group
-                            await bot.send_file(
-                                GROUP_MEDIA, 
-                                media_refs, 
-                                caption=clean_url
-                            )
-                            logger.info(f"✅ Saved (Bridge) {len(media_refs)} items")
-                            
-                            # Cleanup
-                            await bot.delete_messages(user_info.id, bridge_msgs)
-                            if messages_to_cleanup:
-                                await user.delete_messages(TARGET_PRIMARY, messages_to_cleanup)
-                                
-                        else:
-                            raise Exception("Bridge Queue Timeout or Empty")
+                        # Cleanup
+                        if messages_to_cleanup:
+                            await user.delete_messages(TARGET_PRIMARY, messages_to_cleanup)
                         
                     except Exception as e:
-                        logger.error(f"Bridge Error: {e}")
-                        await bot.send_message(GROUP_ERROR, f"⚠️ Bridge Failed: {e}\n{url}", link_preview=False)
+                        logger.error(f"Direct Send Error: {e}")
+                        await bot.send_message(notify_chat_id, f"⚠️ Send Error: {e}")
                 
                 elif final_response:
                     await user.send_message(TARGET_FALLBACK, url)
-                    await bot.send_message(GROUP_ERROR, f"Error\n{url}", link_preview=False)
+                    await user.send_message(GROUP_ERROR, f"Error\n{url}", link_preview=False)
                     logger.warning(f"Error -> Fallback: {url}")
+                    # Cleanup optional for errors, but keeping consistent with user wish to remove "chat"
                     if messages_to_cleanup:
                          await user.delete_messages(TARGET_PRIMARY, messages_to_cleanup)
                 
                 else:
                     await user.send_message(TARGET_FALLBACK, url)
-                    await bot.send_message(GROUP_ERROR, f"Error (Timeout)\n{url}", link_preview=False)
+                    await user.send_message(GROUP_ERROR, f"Error (Timeout)\n{url}", link_preview=False)
                     logger.warning(f"Timeout -> Fallback: {url}")
                     if messages_to_cleanup:
                          await user.delete_messages(TARGET_PRIMARY, messages_to_cleanup)

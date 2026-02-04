@@ -4,6 +4,8 @@ import re
 import os
 import requests
 import time
+import sys
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from telethon import TelegramClient, events
 
@@ -191,6 +193,27 @@ async def process_queue():
             
     IS_PROCESSING = False
     await update_status_message()
+
+@bot.on(events.NewMessage(pattern='/update'))
+async def update_handler(event):
+    if event.chat_id == GROUP_MEDIA or event.is_private:
+        msg = await event.respond("🔄 **Update Requested**\n⬇️ Pulling latest code...")
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                "git pull",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode == 0:
+                await msg.edit(f"✅ **Git Pull Success**\n`{stdout.decode().strip()}`\n\n♻️ Restarting System...")
+                subprocess.Popen(["sudo", "systemctl", "restart", "extracter"])
+                sys.exit(0)
+            else:
+                await msg.edit(f"❌ **Git Pull Failed**\n`{stderr.decode()}`")
+        except Exception as e:
+            await msg.edit(f"❌ **Error:** {e}")
 
 @bot.on(events.NewMessage)
 async def message_handler(event):

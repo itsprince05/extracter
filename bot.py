@@ -181,7 +181,7 @@ async def process_queue():
             try:
                 await bot.send_message(
                     GROUP_ERROR, 
-                    f"Error\n{url}\nReason: {str(e)}", 
+                    f"Error\n{url}", 
                     link_preview=False
                 )
             except:

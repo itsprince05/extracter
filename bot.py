@@ -120,21 +120,10 @@ def fetch_media_task(url):
         # The API returns a simple list of string URLs
         if isinstance(data, list):
             for media_url in data:
-                # We need to determine if it's a video or image
-                # Perform a HEAD request
-                is_video = False
-                try:
-                    head_r = requests.head(media_url, timeout=10)
-                    ct = head_r.headers.get('Content-Type', '').lower()
-                    if 'video' in ct:
-                        is_video = True
-                except:
-                    # Fallback guess if valid URL
-                    pass
-                
+                # We don't need HEAD request anymore, downloader handles it
                 media_list.append({
                     'url': media_url,
-                    'is_video': is_video
+                    'is_video': False # Placeholder, ignored by downloader
                 })
         
         if len(media_list) > 1:
@@ -149,23 +138,58 @@ def fetch_media_task(url):
     except Exception as e:
         return {'error': f"Exception: {str(e)}"}
 
-def download_media_task(media_url, is_video=False):
-    """Synchronous function to download media to temp file."""
+def download_media_task(media_url):
+    """Synchronous function to download media and auto-detect type."""
     try:
-        # Determine extension based on type, fail-safe
-        ext = 'mp4' if is_video else 'jpg'
-            
-        filename = f"temp_{int(time.time() * 1000000)}.{ext}"
-        
+        temp_base = f"temp_{int(time.time() * 1000000)}"
+        temp_file = temp_base # no extension
         
         with requests.get(media_url, stream=True, timeout=60) as r:
             r.raise_for_status()
-            with open(filename, 'wb') as f:
+            with open(temp_file, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-        return filename
+        
+        # Auto-detect type from file signature (Magic Bytes)
+        is_video = False
+        ext = 'bin'
+        
+        with open(temp_file, 'rb') as f:
+            header = f.read(12)
+            
+        header_hex = header.hex().upper()
+        
+        if header_hex.startswith('FFD8FF'):
+            ext = 'jpg'
+            is_video = False
+        elif header_hex.startswith('89504E47'):
+            ext = 'png'
+            is_video = False
+        elif '66747970' in header_hex or '6D6F6F76' in header_hex: # ftyp or moov (mp4 atoms)
+             # Common MP4 sigs start with 000000... ftyp...
+             # '66747970' is 'ftyp' in hex
+             ext = 'mp4'
+             is_video = True
+        else:
+             # Fallback: assume MP4 if unsure because images are usually strictly headers
+             # But let's check content-type from headers if possible? 
+             # No, we already downloaded. Let's just try MP4 as fallback for safety or JPG?
+             # User says "videos aren't sending", so likely they are MP4s being treated as Images.
+             # If we default to MP4 for unknown, Telegram handles 'video' upload as file if invalid.
+             ext = 'mp4' 
+             is_video = True
+
+        final_filename = f"{temp_base}.{ext}"
+        os.rename(temp_file, final_filename)
+        
+        return final_filename, is_video
+
     except Exception as e:
         logger.error(f"Download failed: {e}")
+        if os.path.exists(temp_base):
+             try: os.remove(temp_base)
+             except: pass
+        return None, False
         if os.path.exists(filename):
             try:
                 os.remove(filename)
@@ -186,17 +210,18 @@ async def process_queue():
         
         try:
             # 1. Fetch Metadata (Run in Thread)
-            result = await loop.run_in_executor(executor, fetch_media_task, url)
+                result = await loop.run_in_executor(executor, fetch_media_task, url)
             
             if 'media' in result:
                 media_items = result['media']
                 # 2. Process Media
                 for item in media_items:
                     media_link = item['url']
-                    is_video = item['is_video']
+                    # is_video hint from fetcher is unreliable, ignore it, logic is in downloader now
                     
                     # Download (Run in Thread)
-                    file_path = await loop.run_in_executor(executor, download_media_task, media_link, is_video)
+                    # Returns tuple: (file_path, is_video_bool)
+                    file_path, is_video = await loop.run_in_executor(executor, download_media_task, media_link)
                     
                     if file_path:
                         try:

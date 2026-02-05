@@ -5,6 +5,7 @@ import os
 import requests
 import time
 import sys
+import random
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from telethon import TelegramClient, events
@@ -30,8 +31,11 @@ GROUP_ERROR = -1003650307144
 # Valid headers for requests mostly for download if needed, though instaloader handles its own metadata
 # API_URL = "https://princeapps.com/insta.php" # Removed
 
+
 # Initialize Instaloader
-L = instaloader.Instaloader()
+# Moved inside function for fresh session per request
+# L = instaloader.Instaloader()
+
 # Optional: Configure to not download compressed images, etc.
 # L.download_pictures = False
 # L.download_videos = False 
@@ -95,8 +99,30 @@ def fetch_media_task(url):
         
         shortcode = shortcode_match.group(1)
         
-        # Fetch Post Metadata
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        # Initialize Instaloader locally for fresh session per request to avoid session tainting
+        L = instaloader.Instaloader()
+
+        # Retry logic for 401/429 Rate Limits
+        post = None
+        last_error = None
+        
+        for attempt in range(1, 4):
+            try:
+                # Fetch Post Metadata
+                post = instaloader.Post.from_shortcode(L.context, shortcode)
+                break # Success
+            except (instaloader.ConnectionException, instaloader.LoginRequiredException) as e:
+                last_error = e
+                wait_time = random.randint(10, 20) * attempt
+                print(f"Instaloader Rate Limit (Attempt {attempt}/3). Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                # Re-init to try fresh
+                L = instaloader.Instaloader()
+            except Exception as e:
+                return {'error': str(e)}
+        
+        if not post:
+             return {'error': f"Failed after 3 retries. Last error: {last_error}"}
         
         media_items = []
         
@@ -123,10 +149,6 @@ def fetch_media_task(url):
              
         return {'media': media_items}
 
-    except instaloader.LoginRequiredException as e:
-        return {'error': f"Private Account/Login Required: {e}"}
-    except instaloader.QueryReturnedNotFoundException as e:
-        return {'error': f"Post Not Found: {e}"}
     except Exception as e:
         return {'error': f"Exception: {type(e).__name__} - {str(e)}"}
 
@@ -218,7 +240,7 @@ async def process_queue():
         
         STATS['remaining'] = QUEUE.qsize()
         await update_status_message()
-        await asyncio.sleep(1)
+        await asyncio.sleep(random.randint(5, 10))
             
     IS_PROCESSING = False
     await update_status_message()

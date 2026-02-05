@@ -190,12 +190,6 @@ def download_media_task(media_url):
              try: os.remove(temp_base)
              except: pass
         return None, False
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except:
-                pass
-        return None
 
 async def process_queue():
     """Main worker loop."""
@@ -210,7 +204,7 @@ async def process_queue():
         
         try:
             # 1. Fetch Metadata (Run in Thread)
-                result = await loop.run_in_executor(executor, fetch_media_task, url)
+            result = await loop.run_in_executor(executor, fetch_media_task, url)
             
             if 'media' in result:
                 media_items = result['media']

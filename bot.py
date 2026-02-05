@@ -92,13 +92,12 @@ async def update_status_message():
 def fetch_media_task(url):
     """Fetch media using Authenticated yt-dlp."""
     try:
-        # Configure yt-dlp with cookies
+        # Configure yt-dlp (Anonymous)
         ydl_opts = {
             'quiet': True, 
             'no_warnings': True,
             'extract_flat': False,
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'cookiefile': 'cookies.txt', # Persist session
             'noplaylist': False, # Allow parsing sidecars
             'ignore_no_formats_error': True, # Vital for Image posts
         }
@@ -386,55 +385,12 @@ async def update_handler(event):
 
 
 @bot.on(events.NewMessage)
-async def file_handler(event):
-    """Handle cookies.txt upload."""
-    if not event.is_private or not event.file:
-        return
-
-    # Check if it looks like a text file
-    filename = event.file.name or ""
-    if filename.lower().endswith('.txt') or 'cookies' in filename.lower():
-        path = await event.download_media(file='cookies.txt')
-        await event.respond(f"✅ **Cookies File Uploaded!**\nSaved as: {path}\n\nThe bot will now use these cookies for extraction. Try sending a link now.")
-        # Stop propagation so message_handler doesn't trigger
-        raise events.StopPropagation
-
-@bot.on(events.NewMessage)
 async def message_handler(event):
     if not event.is_private:
         return
     
     chat_id = event.chat_id
     text = event.message.text or ""
-
-    # --- JSON Cookie Support ---
-    if text.strip().startswith(('{"url":', '[{"domain"')):
-        try:
-            data = json.loads(text)
-            cookies = data.get('cookies') if isinstance(data, dict) else data
-            
-            if not isinstance(cookies, list):
-                raise ValueError("No cookie list found")
-
-            # Convert to Netscape Format
-            with open('cookies.txt', 'w') as f:
-                f.write("# Netscape HTTP Cookie File\n")
-                for c in cookies:
-                    domain = c.get('domain', '')
-                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
-                    path = c.get('path', '/')
-                    secure = 'TRUE' if c.get('secure') else 'FALSE'
-                    expiration = str(int(c.get('expirationDate', 0)))
-                    name = c.get('name', '')
-                    value = c.get('value', '')
-                    
-                    f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}\n")
-            
-            await event.respond("✅ **Cookies Text Imported!**\nAccess restored. You can now send links.")
-            return
-        except Exception as e:
-            await event.respond(f"❌ **Invalid Cookie JSON:** {e}")
-            return
 
     if text.startswith('/'):
         return
@@ -478,7 +434,7 @@ async def message_handler(event):
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("👋 Send Instagram links to extract.\n📂 Upload cookies.txt to fix login errors.")
+    await event.respond("👋 Send Instagram links to extract.")
 
 if __name__ == '__main__':
     bot.run_until_disconnected()

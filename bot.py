@@ -90,75 +90,120 @@ async def update_status_message():
 
 
 def fetch_media_task(url):
-    """Fetch media using Direct Instagram GraphQL/JSON API."""
+    """Fetch media using Embed Captioned method (Ported from PHP)."""
     try:
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 243.1.0.14.111',
-            'Accept': '*/*'
-        })
+        clean_url = url.split('?')[0].rstrip('/')
+        embed_url = f"{clean_url}/embed/captioned/"
         
-        # Clean URL
-        clean_link = url.split('?')[0]
-        # Append parameters for JSON
-        api_url = f"{clean_link}?__a=1&__d=dis"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
         
-        response = session.get(api_url, timeout=10)
+        # 1. Fetch Content
+        r = requests.get(embed_url, headers=headers, timeout=15)
+        if r.status_code != 200:
+             return {'error': f"HTTP {r.status_code}"}
         
-        if response.status_code != 200:
-             if response.status_code == 401:
-                 return {'error': "HTTP 401 - Login Required (Server Blocked)"}
-             return {'error': f"HTTP {response.status_code}"}
-             
-        try:
-            data = response.json()
-        except:
-            return {'error': "Invalid JSON Response"}
-            
-        items = []
-        
-        # Locate the media node
-        # Structure varies: sometimes ['items'][0], sometimes ['graphql']['shortcode_media']
-        node = None
-        if 'items' in data and len(data['items']) > 0:
-            node = data['items'][0]
-        elif 'graphql' in data and 'shortcode_media' in data['graphql']:
-            node = data['graphql']['shortcode_media']
-            
-        if not node:
-            return {'error': "No Media Node Found"}
-            
+        content = r.text
         media_list = []
         msgs = []
         
-        # Helper to process a single node
-        def process_node(n):
-            # Check for Video
-            if 'video_versions' in n:
-                # Get best quality video
-                videos = sorted(n['video_versions'], key=lambda x: x['width']*x['height'], reverse=True)
-                if videos:
-                    media_list.append({'url': videos[0]['url'], 'is_video': True})
-            elif 'image_versions2' in n:
-                # Get best quality image
-                images = sorted(n['image_versions2']['candidates'], key=lambda x: x['width']*x['height'], reverse=True)
-                if images:
-                    media_list.append({'url': images[0]['url'], 'is_video': False})
-            
-            # Check Audio flag if available (usually has_audio)
-            if n.get('has_audio') is False and n.get('video_versions'):
-                msgs.append(f"Error - No Audio\n{url}")
+        # 2. Extract Data (PHP Logic Port)
+        # Explode 1
+        parts = content.split('requireLazy(["TimeSliceImpl","ServerJS"],function(TimeSlice,ServerJS){var s=(new ServerJS());s.handle(')
+        
+        context_json = None
+        
+        if len(parts) >= 2:
+            second_part = parts[1]
+            # Explode 2
+            second_parts = second_part.split(');requireLazy(["Run"]')
+            if second_parts:
+                json_data_str = second_parts[0]
+                try:
+                    full_json = json.loads(json_data_str)
+                    
+                    # 3. Find contextJSON recursively
+                    # Helper to parse recursive dict
+                    def find_context_json(d):
+                         if isinstance(d, dict):
+                             for k, v in d.items():
+                                 if k == 'contextJSON':
+                                     return json.loads(v) # Found it (it's a stringified JSON inside)
+                                 
+                                 res = find_context_json(v)
+                                 if res: return res
+                         elif isinstance(d, list):
+                             for item in d:
+                                 res = find_context_json(item)
+                                 if res: return res
+                         return None
+                    
+                    context_json = find_context_json(full_json)
+                    
+                except Exception as e:
+                    logger.error(f"JSON Parse Error: {e}")
 
-        # Check for Sidecar
-        if 'carousel_media' in node:
-            msgs.append(f"Multiple Sidecar\n{url}")
-            for child in node['carousel_media']:
-                process_node(child)
-        else:
-            process_node(node)
+        # 4. Parse Media from contextJSON
+        if context_json:
+            gql_data = context_json.get('gql_data', {})
+            shortcode_media = gql_data.get('shortcode_media')
             
+            if shortcode_media:
+                type_name = shortcode_media.get('__typename')
+                
+                # A. Video
+                if type_name == 'GraphVideo':
+                    media_list.append({
+                        'url': shortcode_media.get('video_url'), 
+                        'is_video': True
+                    })
+                
+                # B. Sidecar
+                elif type_name == 'GraphSidecar':
+                    # User wanted "jitna image video rahe sab bhejo audio ke sath"
+                    # GraphSidecar edges contain nested video/images
+                    edges = shortcode_media.get('edge_sidecar_to_children', {}).get('edges', [])
+                    if len(edges) > 0:
+                        msgs.append(f"Multiple Sidecar\n{url}")
+                        
+                    for edge in edges:
+                        node = edge.get('node', {})
+                        node_type = node.get('__typename')
+                        
+                        if node_type == 'GraphImage':
+                            media_list.append({
+                                'url': node.get('display_url'), 
+                                'is_video': False
+                            })
+                        else:
+                            # Assuming Video if not image
+                            media_list.append({
+                                'url': node.get('video_url'), 
+                                'is_video': True
+                            })
+                
+                # C. Image (GraphImage) or fallback
+                else: 
+                     media_list.append({
+                        'url': shortcode_media.get('display_url'), 
+                        'is_video': False
+                     })
+
+        # 5. Fallback Regex (PHP: preg_match_all '/<img[^>]+src="([^"]+)"/')
         if not media_list:
-             return {'error': "Invalid / No Media Found"}
+             # Try simple image regex if JSON failed
+             matches = re.findall(r'<img[^>]+src="([^"]+)"', content)
+             # PHP code logic: if count >= 2, use [1] (second match)
+             # We will try to find the main image, usually the largest one
+             if matches and len(matches) >= 2:
+                  # Decode HTML entities if needed (python requests usually handles text encoding, but url entities might remain)
+                  # Simplistic approach matching PHP code
+                  fallback_url = matches[1].replace('&amp;', '&')
+                  media_list.append({'url': fallback_url, 'is_video': False})
+
+        if not media_list:
+             return {'error': "No Media Found (Embed Method)"}
 
         msgs = list(set(msgs))
         return {'media': media_list, 'msgs': msgs}

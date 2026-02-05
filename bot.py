@@ -74,11 +74,12 @@ async def update_status_message():
             f"Completed - {STATS['completed']}\n"
             f"Failed - {STATS['failed']}\n"
             f"Remaining - {STATS['remaining']}\n\n"
-            "Processing..."
         )
         
         if STATS['remaining'] == 0 and STATS['total'] > 0:
-            text += "\n\nAll tasks completed..."
+            text += "All tasks completed..."
+        else:
+            text += "Processing..."
 
         await STATS['status_msg'].edit(text)
     except Exception as e:
@@ -90,120 +91,92 @@ async def update_status_message():
 
 
 def fetch_media_task(url):
-    """Fetch media using Embed Captioned method (Ported from PHP)."""
+    """Fetch media using reelsvideo.io Scraper."""
     try:
-        clean_url = url.split('?')[0].rstrip('/')
-        embed_url = f"{clean_url}/embed/captioned/"
+        clean_link = url.split('?')[0].rstrip('/')
         
+        # Extract shortcode/id
+        # supports /p/, /reel/, /tv/
+        shortcode = None
+        for pattern in [r'/p/([^/]+)', r'/reel/([^/]+)', r'/tv/([^/]+)']:
+            match = re.search(pattern, clean_link)
+            if match:
+                shortcode = match.group(1)
+                break
+        
+        if not shortcode:
+             # Fallback if URL is weird, just try to use base
+             target_endpoint = "https://reelsvideo.io/" # Fallback
+        else:
+             target_endpoint = f"https://reelsvideo.io/p/{shortcode}/"
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+            'authority': 'reelsvideo.io',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.9',
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'origin': 'https://reelsvideo.io',
+            'referer': 'https://reelsvideo.io/',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
         }
         
-        # 1. Fetch Content
-        r = requests.get(embed_url, headers=headers, timeout=15)
-        if r.status_code != 200:
-             return {'error': f"HTTP {r.status_code}"}
+        data = {
+            'id': url,
+            'locale': 'en',
+            'tt': 'e47e128f3c05058167cd0489686f359d', # Cloned from user HTML, likely standard or ignored
+            'ts': int(time.time())
+        }
         
-        content = r.text
+        # 1. POST Request
+        # Note: We try to hit the root first if specific endpoint fails, but user provided specific endpoint logic.
+        # Let's try root "/" first as that is what the HTML form says (data-hx-post="/")
+        r = requests.post("https://reelsvideo.io/", headers=headers, data=data, timeout=30)
+        
+        if r.status_code != 200:
+             # Try the specific path as fallback if root fails or returns 404
+             r = requests.post(target_endpoint, headers=headers, data=data, timeout=30)
+             if r.status_code != 200:
+                  return {'error': f"HTTP {r.status_code}"}
+        
+        html = r.text
         media_list = []
         msgs = []
         
-        # 2. Extract Data (PHP Logic Port)
-        # Explode 1
-        parts = content.split('requireLazy(["TimeSliceImpl","ServerJS"],function(TimeSlice,ServerJS){var s=(new ServerJS());s.handle(')
+        # 2. Extract Download Links using Regex
+        # Looking for <a ... href="..." ... class="... download_link ... type_videos ..." ...>
+        # The HTML sample has `class="... download_link type_videos ..."` and `type_images`
         
-        context_json = None
+        # Regex to capture href inside an <a> tag that contains 'download_link'
+        # Group 1: href
+        # We assume the href is double-quoted
         
-        if len(parts) >= 2:
-            second_part = parts[1]
-            # Explode 2
-            second_parts = second_part.split(');requireLazy(["Run"]')
-            if second_parts:
-                json_data_str = second_parts[0]
-                try:
-                    full_json = json.loads(json_data_str)
+        # Find all <a> tags
+        a_tags = re.findall(r'<a[^>]+>', html)
+        
+        for tag in a_tags:
+            if 'download_link' in tag:
+                # Extract href
+                href_match = re.search(r'href="([^"]+)"', tag)
+                if href_match:
+                    media_url = href_match.group(1)
                     
-                    # 3. Find contextJSON recursively
-                    # Helper to parse recursive dict
-                    def find_context_json(d):
-                         if isinstance(d, dict):
-                             for k, v in d.items():
-                                 if k == 'contextJSON':
-                                     return json.loads(v) # Found it (it's a stringified JSON inside)
-                                 
-                                 res = find_context_json(v)
-                                 if res: return res
-                         elif isinstance(d, list):
-                             for item in d:
-                                 res = find_context_json(item)
-                                 if res: return res
-                         return None
+                    # Determine type
+                    is_video = 'type_videos' in tag
                     
-                    context_json = find_context_json(full_json)
-                    
-                except Exception as e:
-                    logger.error(f"JSON Parse Error: {e}")
-
-        # 4. Parse Media from contextJSON
-        if context_json:
-            gql_data = context_json.get('gql_data', {})
-            shortcode_media = gql_data.get('shortcode_media')
+                    # Add to list
+                    # Avoid duplicates
+                    if not any(m['url'] == media_url for m in media_list):
+                        media_list.append({
+                            'url': media_url,
+                            'is_video': is_video
+                        })
+        
+        # Check if sidecar detected (more than 1 item)
+        if len(media_list) > 1:
+            msgs.append(f"Multiple Sidecar\n{url}")
             
-            if shortcode_media:
-                type_name = shortcode_media.get('__typename')
-                
-                # A. Video
-                if type_name == 'GraphVideo':
-                    media_list.append({
-                        'url': shortcode_media.get('video_url'), 
-                        'is_video': True
-                    })
-                
-                # B. Sidecar
-                elif type_name == 'GraphSidecar':
-                    # User wanted "jitna image video rahe sab bhejo audio ke sath"
-                    # GraphSidecar edges contain nested video/images
-                    edges = shortcode_media.get('edge_sidecar_to_children', {}).get('edges', [])
-                    if len(edges) > 0:
-                        msgs.append(f"Multiple Sidecar\n{url}")
-                        
-                    for edge in edges:
-                        node = edge.get('node', {})
-                        node_type = node.get('__typename')
-                        
-                        if node_type == 'GraphImage':
-                            media_list.append({
-                                'url': node.get('display_url'), 
-                                'is_video': False
-                            })
-                        else:
-                            # Assuming Video if not image
-                            media_list.append({
-                                'url': node.get('video_url'), 
-                                'is_video': True
-                            })
-                
-                # C. Image (GraphImage) or fallback
-                else: 
-                     media_list.append({
-                        'url': shortcode_media.get('display_url'), 
-                        'is_video': False
-                     })
-
-        # 5. Fallback Regex (PHP: preg_match_all '/<img[^>]+src="([^"]+)"/')
         if not media_list:
-             # Try simple image regex if JSON failed
-             matches = re.findall(r'<img[^>]+src="([^"]+)"', content)
-             # PHP code logic: if count >= 2, use [1] (second match)
-             # We will try to find the main image, usually the largest one
-             if matches and len(matches) >= 2:
-                  # Decode HTML entities if needed (python requests usually handles text encoding, but url entities might remain)
-                  # Simplistic approach matching PHP code
-                  fallback_url = matches[1].replace('&amp;', '&')
-                  media_list.append({'url': fallback_url, 'is_video': False})
-
-        if not media_list:
-             return {'error': "No Media Found (Embed Method)"}
+             return {'error': "No Media Found (reelsvideo.io)"}
 
         msgs = list(set(msgs))
         return {'media': media_list, 'msgs': msgs}

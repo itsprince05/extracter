@@ -9,6 +9,7 @@ import random
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from telethon import TelegramClient, events
+import instaloader
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -88,89 +89,74 @@ async def update_status_message():
         logger.error(f"Failed to update status message: {e}")
 
 def fetch_media_task(url):
-    """Fetch media using direct GraphQL query."""
+    """Fetch media using Instaloader and parse raw node data."""
     try:
-        # Extract shortcode
         shortcode_match = re.search(r'(?:/p/|/reel/|/tv/)([a-zA-Z0-9_-]+)', url)
         if not shortcode_match:
              return {'error': "Invalid URL format"}
         
         shortcode = shortcode_match.group(1)
         
-        # GraphQL Endpoint construction
-        # Using the doc_id seen in user logs: 8845758582119845
-        graphql_url = "https://www.instagram.com/graphql/query"
-        params = {
-            'variables': f'{{"shortcode":"{shortcode}"}}',
-            'doc_id': '8845758582119845',
-            'server_timestamps': 'true'
-        }
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'X-IG-App-ID': '936619743392459' # Standard public app id
-        }
+        # Initialize Instaloader
+        # Random UA to help with rate limits
+        ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' 
+        L = instaloader.Instaloader(user_agent=ua)
 
-        resp = requests.get(graphql_url, params=params, headers=headers, timeout=30)
-        
-        if resp.status_code != 200:
-             return {'error': f"HTTP {resp.status_code}"}
-             
         try:
-            data = resp.json()
-        except:
-             return {'error': "Invalid JSON Response"}
-             
-        if 'data' not in data or not data['data'].get('xdt_shortcode_media'):
-            return {'error': "Invalid"} # Becomes 'Error - Invalid' in logic
-            
-        media_node = data['data']['xdt_shortcode_media']
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+        except instaloader.ConnectionException as e:
+             # Basic 401/Redirect handling
+             if '401' in str(e) or 'redirect' in str(e).lower():
+                 return {'error': f"HTTP 401 - Rate Limited"}
+             return {'error': str(e)}
+        except Exception as e:
+             return {'error': f"Metadata Fetch Failed: {e}"}
+        
+        # Access Raw Node Data (The user's JSON structure)
+        node = post._node
+        
         media_items = []
         side_channel_msgs = []
         
-        type_name = media_node.get('__typename')
-        
-        # 1. Image
-        if type_name == 'XDTGraphImage':
-            media_items.append({'url': media_node['display_url'], 'is_video': False})
+        # Helper to process a node dict
+        def process_node(n, is_sidecar_child=False):
+            t_name = n.get('__typename')
             
-        # 2. Video
-        elif type_name == 'XDTGraphVideo':
-            vid_url = media_node.get('video_url')
-            if vid_url:
-                media_items.append({'url': vid_url, 'is_video': True})
-                
-            if media_node.get('has_audio') is False:
-                side_channel_msgs.append(f"Error - No Audio\n{url}")
-                
-        # 3. Sidecar
-        elif type_name == 'XDTGraphSidecar':
-            side_channel_msgs.append(f"Multiple Sidecar\n{url}") # Notification req
+            # 1. Image
+            if t_name == 'XDTGraphImage' or t_name == 'GraphImage':
+                if n.get('display_url'):
+                    media_items.append({'url': n['display_url'], 'is_video': False})
             
-            edges = media_node.get('edge_sidecar_to_children', {}).get('edges', [])
-            for edge in edges:
-                node = edge.get('node', {})
-                node_type = node.get('__typename')
+            # 2. Video
+            elif t_name == 'XDTGraphVideo' or t_name == 'GraphVideo':
+                v_url = n.get('video_url')
+                if v_url:
+                    media_items.append({'url': v_url, 'is_video': True})
                 
-                if node_type == 'XDTGraphImage':
-                     if node.get('display_url'):
-                        media_items.append({'url': node['display_url'], 'is_video': False})
-                        
-                elif node_type == 'XDTGraphVideo':
-                    if node.get('video_url'):
-                        media_items.append({'url': node['video_url'], 'is_video': True})
-                        
-                    if node.get('has_audio') is False:
-                        # Prevent duplicate no-audio msgs for same link? 
-                        # User req implies simply sending it.
-                        # Using set to avoid spamming 10 msgs for 10 slides?
-                        # Let's append, unique filter later if needed.
-                        side_channel_msgs.append(f"Error - No Audio\n{url}")
+                # Audio Check (Only if explicitly False)
+                if n.get('has_audio') is False:
+                     side_channel_msgs.append(f"Error - No Audio\n{url}")
+            
+            # 3. Sidecar
+            elif t_name == 'XDTGraphSidecar' or t_name == 'GraphSidecar':
+                if not is_sidecar_child:
+                    side_channel_msgs.append(f"Multiple Sidecar\n{url}")
+                
+                edges = n.get('edge_sidecar_to_children', {}).get('edges', [])
+                for edge in edges:
+                    child_node = edge.get('node', {})
+                    process_node(child_node, is_sidecar_child=True)
+
+        # Start Processing
+        try:
+            process_node(node)
+        except Exception as e:
+            return {'error': f"Parsing Error: {e}"}
         
         if not media_items:
-             return {'error': "No media found"}
+             return {'error': "Invalid"} # Becomes 'Error - Invalid'
              
-        # Remove duplicates from side_channel_msgs to avoid spamming
+        # Dedup messages
         side_channel_msgs = list(set(side_channel_msgs))
              
         return {'media': media_items, 'msgs': side_channel_msgs}

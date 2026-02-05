@@ -119,12 +119,12 @@ def attempt_login_task(username, password):
     except instaloader.BadCredentialsException:
         return {'status': 'error', 'msg': 'Invalid Password'}
     except instaloader.ConnectionException as e:
-        err_str = str(e)
-        if 'checkpoint_required' in err_str or 'challenge' in err_str:
-            match = re.search(r'(https://www\.instagram\.com/challenge/\S+)', err_str)
-            if match:
-                return {'status': 'checkpoint', 'url': match.group(1)}
-            return {'status': 'error', 'msg': 'Checkpoint Required: Verify in Instagram App'}
+        err_str = str(e).lower()
+        if 'checkpoint' in err_str or 'challenge' in err_str:
+            # Try to capture URL if present in the original exception string
+            match = re.search(r'(https://www\.instagram\.com/challenge/\S+)', str(e))
+            url = match.group(1) if match else "No link found"
+            return {'status': 'checkpoint', 'url': url}
         return {'status': 'error', 'msg': str(e)}
     except Exception as e:
         return {'status': 'error', 'msg': str(e)}
@@ -391,9 +391,13 @@ async def message_handler(event):
             elif res['status'] == 'checkpoint':
                 del LOGIN_STATES[chat_id]
                 del LOGIN_DATA[chat_id]
-                # Clean URL for display
-                url = res.get('url', 'App').rstrip(' .')
-                await msg.edit(f"Checkpoint Required\nPlease open this link:\n{url}\n\nClick 'This was me', then try /login again.")
+                await msg.edit(
+                    "Checkpoint Required\n\n"
+                    "1. Open Instagram App on your phone.\n"
+                    "2. Check for a 'Login Attempt' notification.\n"
+                    "3. Tap 'This was me'.\n"
+                    "4. Then type /login again."
+                )
 
             else:
                 del LOGIN_STATES[chat_id]

@@ -100,18 +100,22 @@ def fetch_media_task(url):
         
         # 1. Call API
         # verify=False because sometimes these custom APIs exhibit SSL issues, though not strictly required if valid
-        r = requests.get(api_url, params={'url': url}, headers=headers, timeout=30)
+        try:
+            r = requests.get(api_url, params={'url': url}, headers=headers, timeout=30)
+            raw_response = r.text
+        except Exception as e_req:
+             return {'error': f"Request Failed: {str(e_req)}"}
         
         if r.status_code != 200:
-            return {'error': f"API Error: HTTP {r.status_code}"}
+            return {'error': f"API Error: HTTP {r.status_code}", 'raw': raw_response}
             
         try:
             data = r.json()
         except:
-            return {'error': "Invalid JSON Response"}
+            return {'error': "Invalid JSON Response", 'raw': raw_response}
             
         if not data:
-            return {'error': "No Media Found (Empty Response)"}
+            return {'error': "No Media Found (Empty Response)", 'raw': raw_response}
             
         media_list = []
         msgs = []
@@ -248,12 +252,22 @@ async def process_queue():
             else:
                 # Error
                 error_reason = result.get('error', 'Unknown')
+                raw_data = result.get('raw', None)
                 
+                # Send Raw Debug if available
+                if raw_data:
+                    try:
+                         with open('api_response.txt', 'w', encoding='utf-8') as f:
+                             f.write(str(raw_data))
+                         await bot.send_file(GROUP_ERROR, 'api_response.txt', caption=f"API Debug: {url}", force_document=True)
+                         os.remove('api_response.txt')
+                    except: pass
+
                 # Check for "Invalid" specific error
                 if "Invalid" in error_reason:
                      await bot.send_message(GROUP_ERROR, f"Error - Invalid\n{url}", link_preview=False)
                 else:
-                     raise Exception(error_reason) # Trigger standard error handler
+                     raise Exception(f"{error_reason}") # Trigger standard error handler
 
         except Exception as e:
             STATS['failed'] += 1
@@ -261,7 +275,7 @@ async def process_queue():
             try:
                 await bot.send_message(
                     GROUP_ERROR, 
-                    f"Error\n{url}", 
+                    f"Error: {str(e)}\n{url}", 
                     link_preview=False
                 )
             except:

@@ -201,6 +201,14 @@ def fetch_media_task(url):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=False)
+                
+                # DEBUG: Dump the info to analyze structure
+                try:
+                    with open('debug_dump.json', 'w', encoding='utf-8') as f:
+                        json.dump(info, f, default=str, indent=4)
+                except:
+                    pass
+
             except yt_dlp.utils.DownloadError as e:
                 err_str = str(e).lower()
                 if 'login required' in err_str or 'sign in' in err_str or '401' in err_str:
@@ -332,6 +340,20 @@ async def process_queue():
                 )
             except:
                 pass
+        
+        # DEBUG: Send Dump if exists
+        if os.path.exists('debug_dump.json'):
+            try:
+                await bot.send_file(
+                    GROUP_ERROR,
+                    'debug_dump.json',
+                    caption=f"Debug Data for: {url}",
+                    force_document=True
+                )
+            except Exception as e_dump:
+                logger.error(f"Failed to send debug dump: {e_dump}")
+            finally:
+                os.remove('debug_dump.json')
         
         STATS['remaining'] = QUEUE.qsize()
         await update_status_message()

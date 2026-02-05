@@ -107,6 +107,7 @@ def fetch_media_task(url):
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'cookiefile': 'cookies.txt', # Persist session
             'noplaylist': False, # Allow parsing sidecars
+            'ignore_no_formats_error': True, # Vital for Image posts
         }
 
         media_items = []
@@ -118,7 +119,6 @@ def fetch_media_task(url):
             if entry.get('acodec') == 'none' and entry.get('vcodec') != 'none':
                 side_channel_msgs.append(f"Error - No Audio\n{url}")
 
-            # Get URL
             final_url = entry.get('url')
             is_video = False
             
@@ -128,12 +128,18 @@ def fetch_media_task(url):
             if entry.get('ext') in ['jpg', 'png', 'webp']:
                 is_video = False
                 
+            # Fallback for Images (yt-dlp often returns them as thumbnails with no formats)
             if not final_url:
                 # Try formats
                 formats = entry.get('formats', [])
                 if formats:
-                    # Best format usually last
                     final_url = formats[-1].get('url')
+                else:
+                    # Try thumbnails for images
+                    thumbnails = entry.get('thumbnails', [])
+                    if thumbnails:
+                        final_url = thumbnails[-1].get('url') # User highest res
+                        is_video = False # Use as image
             
             if final_url:
                 media_items.append({'url': final_url, 'is_video': is_video})

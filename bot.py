@@ -335,7 +335,7 @@ async def login_handler(event):
         return
     LOGIN_STATES[event.chat_id] = 'WAITING_USERNAME'
     LOGIN_DATA[event.chat_id] = {}
-    await event.respond("🔐 **Instagram Login**\n\nPlease enter your **Username**:")
+    await event.respond("Instagram Login\n\nPlease enter your Username:")
 
 @bot.on(events.NewMessage)
 async def message_handler(event):
@@ -352,12 +352,12 @@ async def message_handler(event):
         if state == 'WAITING_USERNAME':
             LOGIN_DATA[chat_id]['username'] = text.strip()
             LOGIN_STATES[chat_id] = 'WAITING_PASSWORD'
-            await event.respond("🔑 Enter your **Password**:")
+            await event.respond("Enter your Password:")
             return
 
         elif state == 'WAITING_PASSWORD':
             LOGIN_DATA[chat_id]['password'] = text.strip()
-            msg = await event.respond("⏳ Attempting Login...")
+            msg = await event.respond("Attempting Login...")
             
             # Run blocking login in thread
             loop = asyncio.get_event_loop()
@@ -371,20 +371,20 @@ async def message_handler(event):
             if res['status'] == 'success':
                 del LOGIN_STATES[chat_id]
                 del LOGIN_DATA[chat_id]
-                await msg.edit("✅ **Login Successful!** Session saved.")
+                await msg.edit("Login Successful! Session saved.")
             
             elif res['status'] == '2fa_required':
                 LOGIN_STATES[chat_id] = 'WAITING_OTP'
-                await msg.edit("🛡️ **2FA Required!**\nPlease enter the **SMS/App Code**:")
+                await msg.edit("2FA Required\nPlease enter the SMS/App Code:")
             
             else:
                 del LOGIN_STATES[chat_id]
                 del LOGIN_DATA[chat_id]
-                await msg.edit(f"❌ **Login Failed:** {res.get('msg')}")
+                await msg.edit(f"Login Failed: {res.get('msg')}")
             return
 
         elif state == 'WAITING_OTP':
-            msg = await event.respond("⏳ Verifying 2FA Code...")
+            msg = await event.respond("Verifying 2FA Code...")
             loop = asyncio.get_event_loop()
             res = await loop.run_in_executor(
                 executor, 
@@ -395,11 +395,11 @@ async def message_handler(event):
             if res['status'] == 'success':
                 del LOGIN_STATES[chat_id]
                 del LOGIN_DATA[chat_id]
-                await msg.edit("✅ **2FA Login Successful!** Session saved.")
+                await msg.edit("2FA Login Successful! Session saved.")
             else:
                 del LOGIN_STATES[chat_id] # Reset on fail to avoid stuck loop
                 del LOGIN_DATA[chat_id]
-                await msg.edit(f"❌ **2FA Failed:** {res.get('msg')}")
+                await msg.edit(f"2FA Failed: {res.get('msg')}")
             return
 
     # --- Normal Link Processing ---

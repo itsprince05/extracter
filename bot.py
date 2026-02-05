@@ -30,8 +30,8 @@ GROUP_ERROR = -1003650307144
 # Valid headers for requests mostly for download if needed, though instaloader handles its own metadata
 # API_URL = "https://princeapps.com/insta.php" # Removed
 
-# Initialize Instaloader with User Agent to mimic legitimate browser
-L = instaloader.Instaloader(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+# Initialize Instaloader
+L = instaloader.Instaloader()
 # Optional: Configure to not download compressed images, etc.
 # L.download_pictures = False
 # L.download_videos = False 
@@ -123,12 +123,12 @@ def fetch_media_task(url):
              
         return {'media': media_items}
 
-    except instaloader.LoginRequiredException:
-        return {'error': "Private Account (Login Required) or Rate Limited"}
-    except instaloader.QueryReturnedNotFoundException:
-        return {'error': "Post Not Found"}
+    except instaloader.LoginRequiredException as e:
+        return {'error': f"Private Account/Login Required: {e}"}
+    except instaloader.QueryReturnedNotFoundException as e:
+        return {'error': f"Post Not Found: {e}"}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': f"Exception: {type(e).__name__} - {str(e)}"}
 
 def download_media_task(media_url, is_video=False):
     """Synchronous function to download media to temp file."""
@@ -138,11 +138,8 @@ def download_media_task(media_url, is_video=False):
             
         filename = f"temp_{int(time.time() * 1000000)}.{ext}"
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
         
-        with requests.get(media_url, stream=True, timeout=60, headers=headers) as r:
+        with requests.get(media_url, stream=True, timeout=60) as r:
             r.raise_for_status()
             with open(filename, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -213,7 +210,7 @@ async def process_queue():
             try:
                 await bot.send_message(
                     GROUP_ERROR, 
-                    f"Error\n{url}", 
+                    f"Error: {e}\n{url}", 
                     link_preview=False
                 )
             except:

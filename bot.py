@@ -93,74 +93,63 @@ async def update_status_message():
 
 
 def fetch_media_task(url):
-    """Fetch media using Native Python logic (Port of User's PHP)."""
+    """Fetch media using PrinceApps API."""
     try:
-        # 1. Parse URL to determine Type
-        parsed = urllib.parse.urlparse(url)
-        path_parts = [p for p in parsed.path.strip('/').split('/') if p]
+        api_url = "https://princeapps.com/insta.php"
         
-        # Default type 'p'
-        endpoint_type = 'p'
-        if path_parts:
-            # Check for reel/tv/p
-            if path_parts[0] in ['reel', 'reels', 'tv', 'p']:
-                endpoint_type = path_parts[0]
-                # Normalization: PHP code takes path_parts[0] directly. 
-                # reelsvideo.io likely supports /reel/ /tv/ /p/
-                # Note: 'reels' in URL usually maps to 'reel' endpoint? 
-                # User PHP: $type = $path_parts[0] ?? "p".
-                # If URL is /reel/..., type=reel. Endpoint /reel/.
-                
-        endpoint = f"https://reelsvideo.io/{endpoint_type}/"
+        # 1. Prepare Request
+        # Encode URL for query parameter (Browser behavior)
+        encoded_url = urllib.parse.quote(url)
+        final_api_url = f"https://princeapps.com/insta.php?url={encoded_url}"
         
         headers = {
-            "accept-language": "en-US,en;q=0.9,hi;q=0.8",
-            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-            # Additional headers that might help (not in PHP but good practice)
-            "origin": "https://reelsvideo.io",
-            "referer": f"https://reelsvideo.io/{endpoint_type}/"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
         }
-        
-        # 2. POST Request
-        # PHP: $postData = "id=" . urlencode($insta_url);
-        # Python requests handles dict -> urlencoded params automatically
-        data = {'id': url}
-        
-        r = requests.post(endpoint, data=data, headers=headers, timeout=30)
+
+        try:
+            r = requests.get(final_api_url, headers=headers, timeout=30)
+            raw_response = r.text
+        except Exception as e_req:
+             return {'error': f"Request Failed: {str(e_req)}"}
         
         if r.status_code != 200:
-            return {'error': f"Scraper HTTP {r.status_code}", 'raw': r.text}
+            return {'error': f"API Error: HTTP {r.status_code}", 'raw': raw_response}
             
-        html = r.text
+        try:
+            data = r.json()
+        except:
+            return {'error': "Invalid JSON Response", 'raw': raw_response}
+            
+        if not data:
+            return {'error': "No Media Found (Empty Response)", 'raw': raw_response, 'request_url': r.url}
+            
         media_list = []
         msgs = []
         
-        # 3. Parse HTML (Regex based on PHP DOMXPath)
-        # PHP: xpath->query("//a[contains(@class,'download_link')]")
+        # 2. Process URLs
+        # The API returns a simple list of string URLs
+        if isinstance(data, list):
+            for media_url in data:
+                # Downloader handles type detection
+                media_list.append({
+                    'url': media_url,
+                    'is_video': False # Placeholder
+                })
         
-        # Find all <a> tags
-        a_tags = re.findall(r'<a[^>]+>', html)
-        for tag in a_tags:
-            if 'download_link' in tag:
-                # Extract href
-                href_match = re.search(r'href="([^"]+)"', tag)
-                if href_match:
-                    media_url = href_match.group(1)
-                    if media_url and not any(m['url'] == media_url for m in media_list):
-                        media_list.append({
-                            'url': media_url,
-                            'is_video': False # Ignored, downloader detects
-                        })
-
         if len(media_list) > 1:
             msgs.append(f"Multiple Sidecar\n{url}")
             
         if not media_list:
-             # Just in case, try naive regex if download_link class is missing/obfuscated
-             # Some versions might just wrap it differently?
-             # But we stick to PHP logic for now.
-             return {'error': "No Media Found (Native)", 'raw': html}
+             return {'error': "No Media Found"}
 
         msgs = list(set(msgs))
         return {'media': media_list, 'msgs': msgs}

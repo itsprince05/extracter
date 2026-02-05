@@ -9,7 +9,7 @@ import random
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from telethon import TelegramClient, events
-import instaloader
+import yt_dlp
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -89,72 +89,76 @@ async def update_status_message():
         logger.error(f"Failed to update status message: {e}")
 
 def fetch_media_task(url):
-    """Fetch media using Instaloader and parse raw node data."""
+    """Fetch media using yt-dlp to bypass 401 and handle complex cases."""
     try:
-        shortcode_match = re.search(r'(?:/p/|/reel/|/tv/)([a-zA-Z0-9_-]+)', url)
-        if not shortcode_match:
-             return {'error': "Invalid URL format"}
-        
-        shortcode = shortcode_match.group(1)
-        
-        # Initialize Instaloader
-        # Random UA to help with rate limits
-        ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' 
-        L = instaloader.Instaloader(user_agent=ua)
-
-        try:
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-        except instaloader.ConnectionException as e:
-             # Basic 401/Redirect handling
-             if '401' in str(e) or 'redirect' in str(e).lower():
-                 return {'error': f"HTTP 401 - Rate Limited"}
-             return {'error': str(e)}
-        except Exception as e:
-             return {'error': f"Metadata Fetch Failed: {e}"}
-        
-        # Access Raw Node Data (The user's JSON structure)
-        node = post._node
+        ydl_opts = {
+            'quiet': True, 
+            'no_warnings': True,
+            'extract_flat': False, # Need full details for URLs
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        }
         
         media_items = []
         side_channel_msgs = []
         
-        # Helper to process a node dict
-        def process_node(n, is_sidecar_child=False):
-            t_name = n.get('__typename')
-            
-            # 1. Image
-            if t_name == 'XDTGraphImage' or t_name == 'GraphImage':
-                if n.get('display_url'):
-                    media_items.append({'url': n['display_url'], 'is_video': False})
-            
-            # 2. Video
-            elif t_name == 'XDTGraphVideo' or t_name == 'GraphVideo':
-                v_url = n.get('video_url')
-                if v_url:
-                    media_items.append({'url': v_url, 'is_video': True})
-                
-                # Audio Check (Only if explicitly False)
-                if n.get('has_audio') is False:
-                     side_channel_msgs.append(f"Error - No Audio\n{url}")
-            
-            # 3. Sidecar
-            elif t_name == 'XDTGraphSidecar' or t_name == 'GraphSidecar':
-                if not is_sidecar_child:
-                    side_channel_msgs.append(f"Multiple Sidecar\n{url}")
-                
-                edges = n.get('edge_sidecar_to_children', {}).get('edges', [])
-                for edge in edges:
-                    child_node = edge.get('node', {})
-                    process_node(child_node, is_sidecar_child=True)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False)
+            except yt_dlp.utils.DownloadError as e:
+                # Map specific yt-dlp errors to "Invalid" or generic
+                err_str = str(e).lower()
+                if 'http error 404' in err_str or 'video unavailable' in err_str:
+                    return {'error': "Invalid"} 
+                return {'error': f"Extraction Failed:, {e}"}
+            except Exception as e:
+                return {'error': f"Extraction Error: {e}"}
 
-        # Start Processing
-        try:
-            process_node(node)
-        except Exception as e:
-            return {'error': f"Parsing Error: {e}"}
+        # Helper to process a single info dict
+        def process_entry(entry):
+            # Check if it is video or image
+            # yt-dlp usually separates formats, but for IG it returns a direct URL in 'url' 
+            # or 'formats' list. 'url' is usually the best pre-selected one.
+            
+            is_video = False
+            # Check for video codec
+            if entry.get('vcodec') != 'none' and entry.get('ext') in ['mp4', 'webm']:
+                 is_video = True
+            
+            # If explicit image protocol or extension
+            if entry.get('protocol') == 'http_dash_segments' or entry.get('ext') in ['jpg', 'png', 'webp']:
+                 is_video = False
+                 
+            # Fallback: simple URL check
+            final_url = entry.get('url')
+            if not final_url:
+                 # Try to get best format if 'url' missing
+                 formats = entry.get('formats', [])
+                 if formats:
+                     final_url = formats[-1].get('url') # Naive best
+            
+            if not final_url:
+                return
+
+            # Audio Check for Video
+            if is_video:
+                # acodec 'none' means no audio
+                if entry.get('acodec') == 'none':
+                    side_channel_msgs.append(f"Error - No Audio\n{url}")
+            
+            media_items.append({'url': final_url, 'is_video': is_video})
+
+        # Check for Sidecar (Playlist)
+        if 'entries' in info:
+             # It is a sidecar/album
+             side_channel_msgs.append(f"Multiple Sidecar\n{url}")
+             for entry in info['entries']:
+                 process_entry(entry)
+        else:
+             # Single Item
+             process_entry(info)
         
         if not media_items:
-             return {'error': "Invalid"} # Becomes 'Error - Invalid'
+             return {'error': "Invalid"}
              
         # Dedup messages
         side_channel_msgs = list(set(side_channel_msgs))

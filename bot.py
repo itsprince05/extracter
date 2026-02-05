@@ -345,6 +345,9 @@ async def message_handler(event):
     chat_id = event.chat_id
     text = event.message.text or ""
 
+    if text.startswith('/'):
+        return
+
     # --- Login Flow ---
     if chat_id in LOGIN_STATES:
         state = LOGIN_STATES[chat_id]
@@ -403,9 +406,6 @@ async def message_handler(event):
             return
 
     # --- Normal Link Processing ---
-    if text.startswith('/'):
-        return
-        
     urls = re.findall(r'(https?://(?:www\.)?instagram\.com/\S+)', text)
     
     if urls:

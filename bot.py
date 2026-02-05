@@ -7,6 +7,7 @@ import time
 import sys
 import random
 import subprocess
+import json
 from concurrent.futures import ThreadPoolExecutor
 from telethon import TelegramClient, events
 import yt_dlp
@@ -23,13 +24,7 @@ API_ID = 38659771
 API_HASH = '6178147a40a23ade99f8b3a45f00e436'
 BOT_TOKEN = "8533327762:AAHR1D4CyFpMQQ4NztXhET6OL4wL1kHNkQ4"
 
-# Login Conversation States
-LOGIN_STATES = {} # chat_id -> state_name
-LOGIN_DATA = {}   # chat_id -> {username, password, ...}
 
-# Global Credentials Storage
-CREDENTIALS = {} 
-# Note: cookies.txt will be automatically used/created by yt-dlp in CWD
 
 # Groups
 GROUP_MEDIA = -1003759432523
@@ -99,29 +94,12 @@ async def update_status_message():
     except Exception as e:
         logger.error(f"Failed to update status message: {e}")
 
-# --- Login Logic ---
-def attempt_login_task(username, password):
-    """Store credentials for yt-dlp usage."""
-    try:
-        # Just save them. yt-dlp will use them on first request.
-        CREDENTIALS['username'] = username
-        CREDENTIALS['password'] = password
-        
-        # We could try a dry-run login here, but yt-dlp does it lazily.
-        # To satisfy the UI, we return success.
-        return {'status': 'success'}
-    except Exception as e:
-        return {'status': 'error', 'msg': str(e)}
 
-def attempt_2fa_task(code):
-    # yt-dlp CLI supports 2fa but python lib is trickier. 
-    # For now, assume this flow isn't triggered or return error.
-    return {'status': 'error', 'msg': "2FA not supported with this engine yet."}
 
 def fetch_media_task(url):
     """Fetch media using Authenticated yt-dlp."""
     try:
-        # Configure yt-dlp with credentials
+        # Configure yt-dlp with cookies
         ydl_opts = {
             'quiet': True, 
             'no_warnings': True,
@@ -130,10 +108,6 @@ def fetch_media_task(url):
             'cookiefile': 'cookies.txt', # Persist session
             'noplaylist': False, # Allow parsing sidecars
         }
-        
-        if CREDENTIALS.get('username') and CREDENTIALS.get('password'):
-            ydl_opts['username'] = CREDENTIALS['username']
-            ydl_opts['password'] = CREDENTIALS['password']
 
         media_items = []
         side_channel_msgs = []
@@ -327,40 +301,7 @@ async def update_handler(event):
         except Exception as e:
             await msg.edit(f"Error: {e}")
 
-@bot.on(events.NewMessage(pattern='/login'))
-async def login_handler(event):
-    if not event.is_private:
-        return
-    LOGIN_STATES[event.chat_id] = 'WAITING_USERNAME'
-    LOGIN_DATA[event.chat_id] = {}
-    await event.respond("Instagram Login\n\nPlease enter your Username:")
 
-@bot.on(events.NewMessage(pattern='/logout'))
-async def logout_handler(event):
-    if not event.is_private:
-        return
-    
-    # Clear session files
-    count = 0
-    try:
-        for f in os.listdir('.'):
-            if f.startswith('session-'):
-                os.remove(f)
-                count += 1
-    except Exception as e:
-        logger.error(f"Logout cleanup error: {e}")
-        
-    # Reset Global Credentials
-    CREDENTIALS.clear()
-    
-    # Remove cookies.txt
-    if os.path.exists('cookies.txt'):
-        try:
-            os.remove('cookies.txt')
-        except:
-            pass
-    
-    await event.respond(f"Logged out. Session cleared.")
 
 @bot.on(events.NewMessage)
 async def file_handler(event):
@@ -384,78 +325,37 @@ async def message_handler(event):
     chat_id = event.chat_id
     text = event.message.text or ""
 
+    # --- JSON Cookie Support ---
+    if text.strip().startswith(('{"url":', '[{"domain"')):
+        try:
+            data = json.loads(text)
+            cookies = data.get('cookies') if isinstance(data, dict) else data
+            
+            if not isinstance(cookies, list):
+                raise ValueError("No cookie list found")
+
+            # Convert to Netscape Format
+            with open('cookies.txt', 'w') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                for c in cookies:
+                    domain = c.get('domain', '')
+                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                    path = c.get('path', '/')
+                    secure = 'TRUE' if c.get('secure') else 'FALSE'
+                    expiration = str(int(c.get('expirationDate', 0)))
+                    name = c.get('name', '')
+                    value = c.get('value', '')
+                    
+                    f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}\n")
+            
+            await event.respond("✅ **Cookies Text Imported!**\nAccess restored. You can now send links.")
+            return
+        except Exception as e:
+            await event.respond(f"❌ **Invalid Cookie JSON:** {e}")
+            return
+
     if text.startswith('/'):
         return
-
-    # --- Login Flow ---
-    if chat_id in LOGIN_STATES:
-        state = LOGIN_STATES[chat_id]
-        
-        if state == 'WAITING_USERNAME':
-            LOGIN_DATA[chat_id]['username'] = text.strip()
-            LOGIN_STATES[chat_id] = 'WAITING_PASSWORD'
-            await event.respond("Enter your Password:")
-            return
-
-        elif state == 'WAITING_PASSWORD':
-            LOGIN_DATA[chat_id]['password'] = text.strip()
-            msg = await event.respond("Attempting Login...")
-            
-            # Run blocking login in thread
-            loop = asyncio.get_event_loop()
-            res = await loop.run_in_executor(
-                executor, 
-                attempt_login_task, 
-                LOGIN_DATA[chat_id]['username'],
-                LOGIN_DATA[chat_id]['password']
-            )
-            
-            if res['status'] == 'success':
-                del LOGIN_STATES[chat_id]
-                del LOGIN_DATA[chat_id]
-                await msg.edit("Login Successful! Session saved.")
-            
-            elif res['status'] == '2fa_required':
-                LOGIN_STATES[chat_id] = 'WAITING_OTP'
-                await msg.edit("2FA Required\nPlease enter the SMS/App Code:")
-            
-            elif res['status'] == 'checkpoint':
-                del LOGIN_STATES[chat_id]
-                del LOGIN_DATA[chat_id]
-                await msg.edit(
-                    "Checkpoint Required\n\n"
-                    "Instagram blocked the login because this device is new.\n\n"
-                    "SOLUTION:\n"
-                    "1. Log in to this account on a phone or browser NOW.\n"
-                    "2. You will see a challenge (Captcha/Verify).\n"
-                    "3. Solve it there.\n"
-                    "4. Once logged in there, come back and type /login again."
-                )
-
-            else:
-                del LOGIN_STATES[chat_id]
-                del LOGIN_DATA[chat_id]
-                await msg.edit(f"Login Failed: {res.get('msg')}")
-            return
-
-        elif state == 'WAITING_OTP':
-            msg = await event.respond("Verifying 2FA Code...")
-            loop = asyncio.get_event_loop()
-            res = await loop.run_in_executor(
-                executor, 
-                attempt_2fa_task, 
-                text.strip()
-            )
-            
-            if res['status'] == 'success':
-                del LOGIN_STATES[chat_id]
-                del LOGIN_DATA[chat_id]
-                await msg.edit("2FA Login Successful! Session saved.")
-            else:
-                del LOGIN_STATES[chat_id] # Reset on fail to avoid stuck loop
-                del LOGIN_DATA[chat_id]
-                await msg.edit(f"2FA Failed: {res.get('msg')}")
-            return
 
     # --- Normal Link Processing ---
     urls = re.findall(r'(https?://(?:www\.)?instagram\.com/\S+)', text)
@@ -496,7 +396,7 @@ async def message_handler(event):
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("👋 Send Instagram links.\nUse `/login` to authenticate.")
+    await event.respond("👋 Send Instagram links to extract.\n📂 Upload cookies.txt to fix login errors.")
 
 if __name__ == '__main__':
     bot.run_until_disconnected()

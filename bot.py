@@ -289,7 +289,7 @@ async def process_queue():
 @bot.on(events.NewMessage(pattern='/update'))
 async def update_handler(event):
     if event.chat_id == GROUP_MEDIA or event.is_private:
-        msg = await event.respond("🔄 **Update Requested**\n⬇️ Pulling latest code...")
+        msg = await event.respond("Update Requested\nPulling latest code...")
         try:
             proc = await asyncio.create_subprocess_shell(
                 "git pull",
@@ -299,13 +299,13 @@ async def update_handler(event):
             stdout, stderr = await proc.communicate()
             
             if proc.returncode == 0:
-                await msg.edit(f"✅ **Git Pull Success**\n`{stdout.decode().strip()}`\n\n♻️ Restarting System...")
+                await msg.edit(f"Git Pull Success\n{stdout.decode().strip()}\n\nRestarting System...")
                 subprocess.Popen(["sudo", "systemctl", "restart", "extracter"])
                 sys.exit(0)
             else:
-                await msg.edit(f"❌ **Git Pull Failed**\n`{stderr.decode()}`")
+                await msg.edit(f"Git Pull Failed\n{stderr.decode()}")
         except Exception as e:
-            await msg.edit(f"❌ **Error:** {e}")
+            await msg.edit(f"Error: {e}")
 
 @bot.on(events.NewMessage)
 async def message_handler(event):
@@ -332,7 +332,7 @@ async def message_handler(event):
                 STATS['failed'] = 0
                 STATS['remaining'] = QUEUE.qsize()
                 STATS['status_msg'] = await event.respond(
-                    f"🔄 **Derived Queue** ({added} links)..."
+                    f"Derived Queue ({added} links)..."
                 )
             else:
                 STATS['total'] += added
@@ -343,7 +343,7 @@ async def message_handler(event):
                     except:
                         pass
                 STATS['status_msg'] = await event.respond(
-                    f"🔄 **Queue Updated** (+{added})..."
+                    f"Queue Updated (+{added})..."
                 )
             
             await update_status_message()

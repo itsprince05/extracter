@@ -35,14 +35,7 @@ GROUP_ERROR = -1003650307144
 # API_URL = "https://princeapps.com/insta.php" # Removed
 
 
-# Initialize Instaloader
-# Moved inside function for fresh session per request
-# L = instaloader.Instaloader()
 
-# Optional: Configure to not download compressed images, etc.
-# L.download_pictures = False
-# L.download_videos = False 
-# We only use it to get metadata URLs.
 
 
 # --- Client Initialization ---

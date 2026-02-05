@@ -118,6 +118,14 @@ def attempt_login_task(username, password):
         return {'status': '2fa_required'}
     except instaloader.BadCredentialsException:
         return {'status': 'error', 'msg': 'Invalid Password'}
+    except instaloader.ConnectionException as e:
+        err_str = str(e)
+        if 'checkpoint_required' in err_str or 'challenge' in err_str:
+            match = re.search(r'(https://www\.instagram\.com/challenge/\S+)', err_str)
+            if match:
+                return {'status': 'checkpoint', 'url': match.group(1)}
+            return {'status': 'error', 'msg': 'Checkpoint Required: Verify in Instagram App'}
+        return {'status': 'error', 'msg': str(e)}
     except Exception as e:
         return {'status': 'error', 'msg': str(e)}
 
@@ -380,6 +388,13 @@ async def message_handler(event):
                 LOGIN_STATES[chat_id] = 'WAITING_OTP'
                 await msg.edit("2FA Required\nPlease enter the SMS/App Code:")
             
+            elif res['status'] == 'checkpoint':
+                del LOGIN_STATES[chat_id]
+                del LOGIN_DATA[chat_id]
+                # Clean URL for display
+                url = res.get('url', 'App').rstrip(' .')
+                await msg.edit(f"Checkpoint Required\nPlease open this link:\n{url}\n\nClick 'This was me', then try /login again.")
+
             else:
                 del LOGIN_STATES[chat_id]
                 del LOGIN_DATA[chat_id]
